@@ -11,7 +11,7 @@ kernel_tag_script="/scripts/kernel/kernel-tag-version"
 # Check target tag
 [[ -z "$1" ]] && echo "usage: $0 <new-version>" >&2 && exit 1
 
-# Validate new version
+# Validate new kernel version
 tag="$1"
 for cur_tag in $(git tag); do
 	[[ "$cur_tag" == "$tag" ]] && echo "$tag already tagged" >&2 && exit 1
