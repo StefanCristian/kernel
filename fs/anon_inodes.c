@@ -24,7 +24,8 @@
 #include <asm/uaccess.h>
 
 static struct vfsmount *anon_inode_mnt __read_mostly;
-static struct inode *anon_inode_inode;
+struct inode *anon_inode_inode;
+EXPORT_SYMBOL(anon_inode_inode);
 static const struct file_operations anon_inode_fops;
 
 static int anon_inodefs_get_sb(struct file_system_type *fs_type, int flags,
@@ -83,12 +84,13 @@ static const struct address_space_operations anon_aops = {
  * hence saving memory and avoiding code duplication for the file/inode/dentry
  * setup.  Returns the newly created file* or an error pointer.
  */
-struct file *anon_inode_getfile(const char *name,
-				const struct file_operations *fops,
-				void *priv, int flags)
+static struct file *__anon_inode_getfile(const char *name,
+					 const struct file_operations *fops,
+					 void *priv, int flags,
+					 const struct dentry_operations *dops)
 {
 	struct qstr this;
-	struct dentry *dentry;
+	struct path path;
 	struct file *file;
 	int error;
 
@@ -106,10 +108,11 @@ struct file *anon_inode_getfile(const char *name,
 	this.name = name;
 	this.len = strlen(name);
 	this.hash = 0;
-	dentry = d_alloc(anon_inode_mnt->mnt_sb->s_root, &this);
-	if (!dentry)
+	path.dentry = d_alloc_pseudo(anon_inode_mnt->mnt_sb, &this);
+	if (!path.dentry)
 		goto err_module;
 
+	path.mnt = mntget(anon_inode_mnt);
 	/*
 	 * We know the anon_inode inode count is always greater than zero,
 	 * so we can avoid doing an igrab() and we can use an open-coded
@@ -117,14 +120,13 @@ struct file *anon_inode_getfile(const char *name,
 	 */
 	atomic_inc(&anon_inode_inode->i_count);
 
-	dentry->d_op = &anon_inodefs_dentry_operations;
+	path.dentry->d_op = dops;
 	/* Do not publish this dentry inside the global dentry hash table */
-	dentry->d_flags &= ~DCACHE_UNHASHED;
-	d_instantiate(dentry, anon_inode_inode);
+	path.dentry->d_flags &= ~DCACHE_UNHASHED;
+	d_instantiate(path.dentry, anon_inode_inode);
 
 	error = -ENFILE;
-	file = alloc_file(anon_inode_mnt, dentry,
-			  FMODE_READ | FMODE_WRITE, fops);
+	file = alloc_file(&path, FMODE_READ | FMODE_WRITE, fops);
 	if (!file)
 		goto err_dput;
 	file->f_mapping = anon_inode_inode->i_mapping;
@@ -137,10 +139,17 @@ struct file *anon_inode_getfile(const char *name,
 	return file;
 
 err_dput:
-	dput(dentry);
+	path_put(&path);
 err_module:
 	module_put(fops->owner);
 	return ERR_PTR(error);
+}
+struct file *anon_inode_getfile(const char *name,
+				const struct file_operations *fops,
+				void *priv, int flags)
+{
+	return __anon_inode_getfile(name, fops, priv, flags,
+				    &anon_inodefs_dentry_operations);
 }
 EXPORT_SYMBOL_GPL(anon_inode_getfile);
 
@@ -160,8 +169,9 @@ EXPORT_SYMBOL_GPL(anon_inode_getfile);
  * hence saving memory and avoiding code duplication for the file/inode/dentry
  * setup.  Returns new descriptor or an error code.
  */
-int anon_inode_getfd(const char *name, const struct file_operations *fops,
-		     void *priv, int flags)
+int __anon_inode_getfd(const char *name, const struct file_operations *fops,
+		       void *priv, int flags,
+		       const struct dentry_operations *dops)
 {
 	int error, fd;
 	struct file *file;
@@ -171,7 +181,7 @@ int anon_inode_getfd(const char *name, const struct file_operations *fops,
 		return error;
 	fd = error;
 
-	file = anon_inode_getfile(name, fops, priv, flags);
+	file = __anon_inode_getfile(name, fops, priv, flags, dops);
 	if (IS_ERR(file)) {
 		error = PTR_ERR(file);
 		goto err_put_unused_fd;
@@ -184,6 +194,13 @@ err_put_unused_fd:
 	put_unused_fd(fd);
 	return error;
 }
+int anon_inode_getfd(const char *name, const struct file_operations *fops,
+		     void *priv, int flags)
+{
+	return __anon_inode_getfd(name, fops, priv, flags,
+				  &anon_inodefs_dentry_operations);
+}
+EXPORT_SYMBOL(__anon_inode_getfd);
 EXPORT_SYMBOL_GPL(anon_inode_getfd);
 
 /*

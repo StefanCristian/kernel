@@ -12,6 +12,7 @@
 #include <linux/utsname.h>
 #include <linux/utsrelease.h>
 #include <linux/version.h>
+#include <linux/proc_fs.h>
 
 #ifndef CONFIG_KALLSYMS
 #define version(a) Version_ ## a
@@ -33,8 +34,15 @@ struct uts_namespace init_uts_ns = {
 		.machine	= UTS_MACHINE,
 		.domainname	= UTS_DOMAINNAME,
 	},
+	.proc_inum = PROC_UTS_INIT_INO,
 };
 EXPORT_SYMBOL_GPL(init_uts_ns);
+
+struct new_utsname virt_utsname = {
+	/* we need only this field */
+	.release        = UTS_RELEASE,
+};
+EXPORT_SYMBOL(virt_utsname);
 
 /* FIXED STRINGS! Don't touch! */
 const char linux_banner[] =

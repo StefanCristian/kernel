@@ -578,13 +578,13 @@ asmlinkage long sys32_execve(char __user *name, compat_uptr_t __user *argv,
 			     compat_uptr_t __user *envp, struct pt_regs *regs)
 {
 	long error;
-	char *filename;
+	struct filename *filename;
 
 	filename = getname(name);
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
 		return error;
-	error = compat_do_execve(filename, argv, envp, regs);
+	error = compat_do_execve(filename->name, argv, envp, regs);
 	putname(filename);
 	return error;
 }
@@ -621,20 +621,6 @@ long sys32_fadvise64_64(int fd, __u32 offset_low, __u32 offset_high,
 			       (((u64)offset_high)<<32) | offset_low,
 			       (((u64)len_high)<<32) | len_low,
 				advice);
-}
-
-long sys32_vm86_warning(void)
-{
-	struct task_struct *me = current;
-	static char lastcomm[sizeof(me->comm)];
-
-	if (strncmp(lastcomm, me->comm, sizeof(lastcomm))) {
-		compat_printk(KERN_INFO
-			      "%s: vm86 mode not supported on 64 bit kernel\n",
-			      me->comm);
-		strncpy(lastcomm, me->comm, sizeof(lastcomm));
-	}
-	return -ENOSYS;
 }
 
 long sys32_lookup_dcookie(u32 addr_low, u32 addr_high,

@@ -53,6 +53,7 @@ struct nfqnl_instance {
 
 	u_int16_t queue_num;			/* number of this queue */
 	u_int8_t copy_mode;
+	u_int32_t flags;			/* Set using NFQA_CFG_FLAGS */
 
 	spinlock_t lock;
 
@@ -391,36 +392,47 @@ nfqnl_enqueue_packet(struct nf_queue_entry *entry, unsigned int queuenum)
 {
 	struct sk_buff *nskb;
 	struct nfqnl_instance *queue;
-	int err;
+	int err = -ENOBUFS;
+	int failopen = 0;
 
 	/* rcu_read_lock()ed by nf_hook_slow() */
 	queue = instance_lookup(queuenum);
-	if (!queue)
+	if (!queue) {
+		err = -ESRCH;
 		goto err_out;
+	}
 
-	if (queue->copy_mode == NFQNL_COPY_NONE)
+	if (queue->copy_mode == NFQNL_COPY_NONE) {
+		err = -EINVAL;
 		goto err_out;
+	}
 
 	nskb = nfqnl_build_packet_message(queue, entry);
-	if (nskb == NULL)
+	if (nskb == NULL) {
+		err = -ENOMEM;
 		goto err_out;
-
+	}
 	spin_lock_bh(&queue->lock);
 
-	if (!queue->peer_pid)
+	if (!queue->peer_pid) {
+		err = -EINVAL;
 		goto err_out_free_nskb;
-
+	}
 	if (queue->queue_total >= queue->queue_maxlen) {
-		queue->queue_dropped++;
-		if (net_ratelimit())
-			  printk(KERN_WARNING "nf_queue: full at %d entries, "
-				 "dropping packets(s). Dropped: %d\n",
-				 queue->queue_total, queue->queue_dropped);
+		if (queue->flags & NFQA_CFG_F_FAIL_OPEN) {
+			failopen = 1;
+			err = 0;
+		} else {	
+			queue->queue_dropped++;
+			if (net_ratelimit())
+			    printk(KERN_WARNING "nf_queue: full at %d entries, ""dropping packets(s). Dropped: %d\n",
+				   queue->queue_total, queue->queue_dropped);
+		}
 		goto err_out_free_nskb;
 	}
 
 	/* nfnetlink_unicast will either free the nskb or add it to a socket */
-	err = nfnetlink_unicast(nskb, queue->peer_pid, MSG_DONTWAIT);
+	err = nfnetlink_unicast(nskb, &init_net, queue->peer_pid, MSG_DONTWAIT);
 	if (err < 0) {
 		queue->queue_user_dropped++;
 		goto err_out_unlock;
@@ -435,8 +447,10 @@ err_out_free_nskb:
 	kfree_skb(nskb);
 err_out_unlock:
 	spin_unlock_bh(&queue->lock);
+	if (failopen)
+		nf_reinject(entry, NF_ACCEPT);
 err_out:
-	return -1;
+	return err;
 }
 
 static int
@@ -555,9 +569,6 @@ nfqnl_rcv_dev_event(struct notifier_block *this,
 {
 	struct net_device *dev = ptr;
 
-	if (!net_eq(dev_net(dev), &init_net))
-		return NOTIFY_DONE;
-
 	/* Drop any packets associated with the downed device */
 	if (event == NETDEV_DOWN)
 		nfqnl_dev_drop(dev->ifindex);
@@ -586,8 +597,7 @@ nfqnl_rcv_nl_event(struct notifier_block *this,
 			struct hlist_head *head = &instance_table[i];
 
 			hlist_for_each_entry_safe(inst, tmp, t2, head, hlist) {
-				if ((n->net == &init_net) &&
-				    (n->pid == inst->peer_pid))
+				if (n->pid == inst->peer_pid)
 					__instance_destroy(inst);
 			}
 		}
@@ -770,6 +780,36 @@ nfqnl_recv_config(struct sock *ctnl, struct sk_buff *skb,
 		queue_maxlen = nla_data(nfqa[NFQA_CFG_QUEUE_MAXLEN]);
 		spin_lock_bh(&queue->lock);
 		queue->queue_maxlen = ntohl(*queue_maxlen);
+		spin_unlock_bh(&queue->lock);
+	}
+
+	if (nfqa[NFQA_CFG_FLAGS]) {
+		__u32 flags, mask;
+
+		if (!queue) {
+			ret = -ENODEV;
+			goto err_out_unlock;
+		}
+
+		if (!nfqa[NFQA_CFG_MASK]) {
+			/* A mask is needed to specify which flags are being
+			 * changed.
+			 */
+			ret = -EINVAL;
+			goto err_out_unlock;
+		}
+
+		flags = ntohl(nla_get_be32(nfqa[NFQA_CFG_FLAGS]));
+		mask = ntohl(nla_get_be32(nfqa[NFQA_CFG_MASK]));
+
+		if (flags >= NFQA_CFG_F_MAX) {
+			ret = -EOPNOTSUPP;
+			goto err_out_unlock;
+		}
+
+		spin_lock_bh(&queue->lock);
+		queue->flags &= ~mask;
+		queue->flags |= flags & mask;
 		spin_unlock_bh(&queue->lock);
 	}
 

@@ -30,6 +30,7 @@
 #include <linux/syscalls.h>
 #include <linux/uio.h>
 #include <linux/security.h>
+#include <linux/virtinfo.h>
 
 /*
  * Attempt to steal a page from a pipe buffer. This should perhaps go into
@@ -100,6 +101,7 @@ static int page_cache_pipe_buf_confirm(struct pipe_inode_info *pipe,
 	int err;
 
 	if (!PageUptodate(page)) {
+		virtinfo_notifier_call(VITYPE_IO, VIRTINFO_IO_PREPARE, NULL);
 		lock_page(page);
 
 		/*
@@ -131,7 +133,7 @@ error:
 	return err;
 }
 
-static const struct pipe_buf_operations page_cache_pipe_buf_ops = {
+const struct pipe_buf_operations page_cache_pipe_buf_ops = {
 	.can_merge = 0,
 	.map = generic_pipe_buf_map,
 	.unmap = generic_pipe_buf_unmap,
@@ -259,7 +261,7 @@ ssize_t splice_to_pipe(struct pipe_inode_info *pipe,
 	return ret;
 }
 
-static void spd_release_page(struct splice_pipe_desc *spd, unsigned int i)
+void spd_release_page(struct splice_pipe_desc *spd, unsigned int i)
 {
 	page_cache_release(spd->pages[i]);
 }
@@ -290,11 +292,22 @@ __generic_file_splice_read(struct file *in, loff_t *ppos,
 	req_pages = (len + loff + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
 	nr_pages = min(req_pages, (unsigned)PIPE_BUFFERS);
 
+	check_pagecache_limits(mapping, mapping_gfp_mask(mapping));
+
 	/*
 	 * Lookup the (hopefully) full range of pages we need.
 	 */
 	spd.nr_pages = find_get_pages_contig(mapping, index, nr_pages, pages);
 	index += spd.nr_pages;
+
+	while (spd.nr_pages < nr_pages && mapping->host->i_peer_file) {
+		page = pick_peer_page(mapping->host, &in->f_ra, index,
+				      req_pages - spd.nr_pages);
+		if (!page)
+			break;
+		pages[spd.nr_pages++] = page;
+		index++;
+	}
 
 	/*
 	 * If find_get_pages_contig() returned fewer pages than we needed,
@@ -365,7 +378,22 @@ __generic_file_splice_read(struct file *in, loff_t *ppos,
 		 * If the page isn't uptodate, we may need to start io on it
 		 */
 		if (!PageUptodate(page)) {
-			lock_page(page);
+			/*
+			 * If in nonblock mode then dont block on waiting
+			 * for an in-flight io page
+			 */
+			if (flags & SPLICE_F_NONBLOCK) {
+				if ((virtinfo_notifier_call(VITYPE_IO,
+						VIRTINFO_IO_CONGESTION, NULL) &
+							NOTIFY_FAIL) ||
+						!trylock_page(page)) {
+					error = -EAGAIN;
+					break;
+				}
+			} else {
+				virtinfo_notifier_call(VITYPE_IO, VIRTINFO_IO_PREPARE, NULL);
+				lock_page(page);
+			}
 
 			/*
 			 * Page was truncated, or invalidated by the
@@ -527,7 +555,7 @@ static ssize_t kernel_readv(struct file *file, const struct iovec *vec,
 	return res;
 }
 
-static ssize_t kernel_write(struct file *file, const char *buf, size_t count,
+ssize_t kernel_write(struct file *file, const char *buf, size_t count,
 			    loff_t pos)
 {
 	mm_segment_t old_fs;
@@ -541,6 +569,7 @@ static ssize_t kernel_write(struct file *file, const char *buf, size_t count,
 
 	return res;
 }
+EXPORT_SYMBOL(kernel_write);
 
 ssize_t default_file_splice_read(struct file *in, loff_t *ppos,
 				 struct pipe_inode_info *pipe, size_t len,
@@ -947,6 +976,8 @@ generic_file_splice_write(struct pipe_inode_info *pipe, struct file *out,
 	};
 	ssize_t ret;
 
+	sb_start_write(inode->i_sb);
+
 	pipe_lock(pipe);
 
 	splice_from_pipe_begin(&sd);
@@ -955,7 +986,7 @@ generic_file_splice_write(struct pipe_inode_info *pipe, struct file *out,
 		if (ret <= 0)
 			break;
 
-		mutex_lock_nested(&inode->i_mutex, I_MUTEX_CHILD);
+		mutex_lock(&inode->i_mutex);
 		ret = file_remove_suid(out);
 		if (!ret) {
 			file_update_time(out);
@@ -983,6 +1014,7 @@ generic_file_splice_write(struct pipe_inode_info *pipe, struct file *out,
 			*ppos += ret;
 		balance_dirty_pages_ratelimited_nr(mapping, nr_pages);
 	}
+	sb_end_write(inode->i_sb);
 
 	return ret;
 }
@@ -1258,6 +1290,7 @@ long do_splice_direct(struct file *in, loff_t *ppos, struct file *out,
 
 	return ret;
 }
+EXPORT_SYMBOL(do_splice_direct);
 
 static int splice_pipe_to_pipe(struct pipe_inode_info *ipipe,
 			       struct pipe_inode_info *opipe,

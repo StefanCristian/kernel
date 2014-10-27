@@ -127,7 +127,7 @@ void br_netfilter_rtable_init(struct net_bridge *br)
 	rt->u.dst.dev = br->dev;
 	rt->u.dst.path = &rt->u.dst;
 	rt->u.dst.metrics[RTAX_MTU - 1] = 1500;
-	rt->u.dst.flags	= DST_NOXFRM;
+	rt->u.dst.flags	= DST_NOXFRM | DST_FAKE_RTABLE;
 	rt->u.dst.ops = &fake_dst_ops;
 }
 
@@ -141,8 +141,18 @@ static inline struct rtable *bridge_parent_rtable(const struct net_device *dev)
 static inline struct net_device *bridge_parent(const struct net_device *dev)
 {
 	struct net_bridge_port *port = rcu_dereference(dev->br_port);
+	struct net_device *master_dev;
+	struct net_bridge *br;
 
-	return port ? port->br->dev : NULL;
+	if (!port)
+		return NULL;
+
+	br = port->br;
+	master_dev = rcu_dereference(br->master_dev);
+	if (br->via_phys_dev && master_dev)
+		return master_dev;
+	else
+		return br->dev;
 }
 
 static inline struct nf_bridge_info *nf_bridge_alloc(struct sk_buff *skb)
@@ -634,11 +644,7 @@ static unsigned int br_nf_local_in(unsigned int hook, struct sk_buff *skb,
 				   const struct net_device *out,
 				   int (*okfn)(struct sk_buff *))
 {
-	struct rtable *rt = skb_rtable(skb);
-
-	if (rt && rt == bridge_parent_rtable(in))
-		skb_dst_drop(skb);
-
+	br_drop_fake_rtable(skb);
 	return NF_ACCEPT;
 }
 
@@ -705,6 +711,9 @@ static unsigned int br_nf_forward_ip(unsigned int hook, struct sk_buff *skb,
 		skb->pkt_type = PACKET_HOST;
 		nf_bridge->mask |= BRNF_PKT_TYPE;
 	}
+
+	/* BUG: Should really parse the IP options here. */
+	memset(IPCB(skb), 0, sizeof(struct inet_skb_parm));
 
 	/* The physdev module checks on this */
 	nf_bridge->mask |= BRNF_BRIDGED;
@@ -789,6 +798,9 @@ static unsigned int br_nf_local_out(unsigned int hook, struct sk_buff *skb,
 	}
 	nf_bridge_push_encap_header(skb);
 
+	/* BUG: Should really parse the IP options here. */
+	memset(IPCB(skb), 0, sizeof(struct inet_skb_parm));
+
 	NF_HOOK(PF_BRIDGE, NF_BR_FORWARD, skb, realindev, skb->dev,
 		br_forward_finish);
 	return NF_STOLEN;
@@ -797,8 +809,7 @@ static unsigned int br_nf_local_out(unsigned int hook, struct sk_buff *skb,
 #if defined(CONFIG_NF_CONNTRACK_IPV4) || defined(CONFIG_NF_CONNTRACK_IPV4_MODULE)
 static int br_nf_dev_queue_xmit(struct sk_buff *skb)
 {
-	if (skb->nfct != NULL &&
-	    (skb->protocol == htons(ETH_P_IP) || IS_VLAN_IP(skb)) &&
+	if ((skb->protocol == htons(ETH_P_IP) || IS_VLAN_IP(skb)) &&
 	    skb->len > skb->dev->mtu &&
 	    !skb_is_gso(skb)) {
 		/* BUG: Should really parse the IP options here. */

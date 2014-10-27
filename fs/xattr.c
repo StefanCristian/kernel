@@ -115,6 +115,15 @@ vfs_setxattr(struct dentry *dentry, const char *name, const void *value,
 	struct inode *inode = dentry->d_inode;
 	int error;
 
+#if defined(CONFIG_VE) && defined(CONFIG_SYSCTL)
+	if (!ve_is_super(get_exec_env())) {
+		if (ve_xattr_policy == VE_XATTR_POLICY_IGNORE)
+			return 0;
+		else if (ve_xattr_policy == VE_XATTR_POLICY_REJECT)
+			return -EPERM;
+	}
+#endif
+
 	error = xattr_permission(inode, name, MAY_WRITE);
 	if (error)
 		return error;
@@ -130,7 +139,7 @@ out:
 	mutex_unlock(&inode->i_mutex);
 	return error;
 }
-EXPORT_SYMBOL_GPL(vfs_setxattr);
+EXPORT_SYMBOL(vfs_setxattr);
 
 ssize_t
 xattr_getsecurity(struct inode *inode, const char *name, void *value,
@@ -193,7 +202,7 @@ nolsm:
 
 	return error;
 }
-EXPORT_SYMBOL_GPL(vfs_getxattr);
+EXPORT_SYMBOL(vfs_getxattr);
 
 ssize_t
 vfs_listxattr(struct dentry *d, char *list, size_t size)
@@ -213,7 +222,7 @@ vfs_listxattr(struct dentry *d, char *list, size_t size)
 	}
 	return error;
 }
-EXPORT_SYMBOL_GPL(vfs_listxattr);
+EXPORT_SYMBOL(vfs_listxattr);
 
 int
 vfs_removexattr(struct dentry *dentry, const char *name)
@@ -240,7 +249,7 @@ vfs_removexattr(struct dentry *dentry, const char *name)
 		fsnotify_xattr(dentry);
 	return error;
 }
-EXPORT_SYMBOL_GPL(vfs_removexattr);
+EXPORT_SYMBOL(vfs_removexattr);
 
 
 /*
@@ -282,8 +291,9 @@ SYSCALL_DEFINE5(setxattr, const char __user *, pathname,
 {
 	struct path path;
 	int error;
-
-	error = user_path(pathname, &path);
+	unsigned int lookup_flags = LOOKUP_FOLLOW;
+retry:
+	error = user_path_at(AT_FDCWD, pathname, lookup_flags, &path);
 	if (error)
 		return error;
 	error = mnt_want_write(path.mnt);
@@ -292,6 +302,10 @@ SYSCALL_DEFINE5(setxattr, const char __user *, pathname,
 		mnt_drop_write(path.mnt);
 	}
 	path_put(&path);
+	if (retry_estale(error, lookup_flags)) {
+		lookup_flags |= LOOKUP_REVAL;
+		goto retry;
+	}
 	return error;
 }
 
@@ -301,8 +315,9 @@ SYSCALL_DEFINE5(lsetxattr, const char __user *, pathname,
 {
 	struct path path;
 	int error;
-
-	error = user_lpath(pathname, &path);
+	unsigned int lookup_flags = 0;
+retry:
+	error = user_path_at(AT_FDCWD, pathname, lookup_flags, &path);
 	if (error)
 		return error;
 	error = mnt_want_write(path.mnt);
@@ -311,6 +326,10 @@ SYSCALL_DEFINE5(lsetxattr, const char __user *, pathname,
 		mnt_drop_write(path.mnt);
 	}
 	path_put(&path);
+	if (retry_estale(error, lookup_flags)) {
+		lookup_flags |= LOOKUP_REVAL;
+		goto retry;
+	}
 	return error;
 }
 
@@ -325,7 +344,7 @@ SYSCALL_DEFINE5(fsetxattr, int, fd, const char __user *, name,
 	if (!f)
 		return error;
 	dentry = f->f_path.dentry;
-	audit_inode(NULL, dentry);
+	audit_inode(NULL, dentry, 0);
 	error = mnt_want_write_file(f);
 	if (!error) {
 		error = setxattr(dentry, name, value, size, flags);
@@ -378,12 +397,17 @@ SYSCALL_DEFINE4(getxattr, const char __user *, pathname,
 {
 	struct path path;
 	ssize_t error;
-
-	error = user_path(pathname, &path);
+	unsigned int lookup_flags = LOOKUP_FOLLOW;
+retry:
+	error = user_path_at(AT_FDCWD, pathname, lookup_flags, &path);
 	if (error)
 		return error;
 	error = getxattr(path.dentry, name, value, size);
 	path_put(&path);
+	if (retry_estale(error, lookup_flags)) {
+		lookup_flags |= LOOKUP_REVAL;
+		goto retry;
+	}
 	return error;
 }
 
@@ -410,7 +434,7 @@ SYSCALL_DEFINE4(fgetxattr, int, fd, const char __user *, name,
 	f = fget(fd);
 	if (!f)
 		return error;
-	audit_inode(NULL, f->f_path.dentry);
+	audit_inode(NULL, f->f_path.dentry, 0);
 	error = getxattr(f->f_path.dentry, name, value, size);
 	fput(f);
 	return error;
@@ -451,12 +475,17 @@ SYSCALL_DEFINE3(listxattr, const char __user *, pathname, char __user *, list,
 {
 	struct path path;
 	ssize_t error;
-
-	error = user_path(pathname, &path);
+	unsigned int lookup_flags = LOOKUP_FOLLOW;
+retry:
+	error = user_path_at(AT_FDCWD, pathname, lookup_flags, &path);
 	if (error)
 		return error;
 	error = listxattr(path.dentry, list, size);
 	path_put(&path);
+	if (retry_estale(error, lookup_flags)) {
+		lookup_flags |= LOOKUP_REVAL;
+		goto retry;
+	}
 	return error;
 }
 
@@ -465,12 +494,17 @@ SYSCALL_DEFINE3(llistxattr, const char __user *, pathname, char __user *, list,
 {
 	struct path path;
 	ssize_t error;
-
-	error = user_lpath(pathname, &path);
+	unsigned int lookup_flags = 0;
+retry:
+	error = user_path_at(AT_FDCWD, pathname, lookup_flags, &path);
 	if (error)
 		return error;
 	error = listxattr(path.dentry, list, size);
 	path_put(&path);
+	if (retry_estale(error, lookup_flags)) {
+		lookup_flags |= LOOKUP_REVAL;
+		goto retry;
+	}
 	return error;
 }
 
@@ -482,7 +516,7 @@ SYSCALL_DEFINE3(flistxattr, int, fd, char __user *, list, size_t, size)
 	f = fget(fd);
 	if (!f)
 		return error;
-	audit_inode(NULL, f->f_path.dentry);
+	audit_inode(NULL, f->f_path.dentry, 0);
 	error = listxattr(f->f_path.dentry, list, size);
 	fput(f);
 	return error;
@@ -511,8 +545,9 @@ SYSCALL_DEFINE2(removexattr, const char __user *, pathname,
 {
 	struct path path;
 	int error;
-
-	error = user_path(pathname, &path);
+	unsigned int lookup_flags = LOOKUP_FOLLOW;
+retry:
+	error = user_path_at(AT_FDCWD, pathname, lookup_flags, &path);
 	if (error)
 		return error;
 	error = mnt_want_write(path.mnt);
@@ -521,6 +556,10 @@ SYSCALL_DEFINE2(removexattr, const char __user *, pathname,
 		mnt_drop_write(path.mnt);
 	}
 	path_put(&path);
+	if (retry_estale(error, lookup_flags)) {
+		lookup_flags |= LOOKUP_REVAL;
+		goto retry;
+	}
 	return error;
 }
 
@@ -529,8 +568,9 @@ SYSCALL_DEFINE2(lremovexattr, const char __user *, pathname,
 {
 	struct path path;
 	int error;
-
-	error = user_lpath(pathname, &path);
+	unsigned int lookup_flags = 0;
+retry:
+	error = user_path_at(AT_FDCWD, pathname, lookup_flags, &path);
 	if (error)
 		return error;
 	error = mnt_want_write(path.mnt);
@@ -539,6 +579,10 @@ SYSCALL_DEFINE2(lremovexattr, const char __user *, pathname,
 		mnt_drop_write(path.mnt);
 	}
 	path_put(&path);
+	if (retry_estale(error, lookup_flags)) {
+		lookup_flags |= LOOKUP_REVAL;
+		goto retry;
+	}
 	return error;
 }
 
@@ -552,7 +596,7 @@ SYSCALL_DEFINE2(fremovexattr, int, fd, const char __user *, name)
 	if (!f)
 		return error;
 	dentry = f->f_path.dentry;
-	audit_inode(NULL, dentry);
+	audit_inode(NULL, dentry, 0);
 	error = mnt_want_write_file(f);
 	if (!error) {
 		error = removexattr(dentry, name);

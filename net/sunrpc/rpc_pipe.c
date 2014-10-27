@@ -28,6 +28,8 @@
 #include <linux/sunrpc/rpc_pipe_fs.h>
 #include <linux/sunrpc/cache.h>
 
+#include "ve.h"
+
 static struct vfsmount *rpc_mount __read_mostly;
 static int rpc_mount_count;
 
@@ -359,21 +361,23 @@ rpc_show_info(struct seq_file *m, void *v)
 static int
 rpc_info_open(struct inode *inode, struct file *file)
 {
-	struct rpc_clnt *clnt;
+	struct rpc_clnt *clnt = NULL;
 	int ret = single_open(file, rpc_show_info, NULL);
 
 	if (!ret) {
 		struct seq_file *m = file->private_data;
-		mutex_lock(&inode->i_mutex);
-		clnt = RPC_I(inode)->private;
-		if (clnt) {
-			kref_get(&clnt->cl_kref);
+
+		spin_lock(&file->f_path.dentry->d_lock);
+		if (!d_unhashed(file->f_path.dentry))
+			clnt = RPC_I(inode)->private;
+		if (clnt != NULL && atomic_inc_not_zero(&clnt->cl_count)) {
+			spin_unlock(&file->f_path.dentry->d_lock);
 			m->private = clnt;
 		} else {
+			spin_unlock(&file->f_path.dentry->d_lock);
 			single_release(inode, file);
 			ret = -EINVAL;
 		}
-		mutex_unlock(&inode->i_mutex);
 	}
 	return ret;
 }
@@ -459,7 +463,7 @@ static int __rpc_create_common(struct inode *dir, struct dentry *dentry,
 {
 	struct inode *inode;
 
-	BUG_ON(!d_unhashed(dentry));
+	d_drop(dentry);
 	inode = rpc_get_inode(dir->i_sb, mode);
 	if (!inode)
 		goto out_err;
@@ -1052,6 +1056,12 @@ init_once(void *foo)
 int register_rpc_pipefs(void)
 {
 	int err;
+	struct ve_struct *ve;
+
+	ve = get_exec_env();
+	if (!ve_is_super(ve))
+		return register_ve_fs_type(ve, &rpc_pipe_fs_type,
+				&rpc_pipefs_fstype, NULL);
 
 	rpc_inode_cachep = kmem_cache_create("rpc_inode_cache",
 				sizeof(struct rpc_inode),
@@ -1071,6 +1081,14 @@ int register_rpc_pipefs(void)
 
 void unregister_rpc_pipefs(void)
 {
+	struct ve_struct *ve;
+
+	ve = get_exec_env();
+	if (!ve_is_super(ve)) {
+		unregister_ve_fs_type(rpc_pipefs_fstype, NULL);
+		return;
+	}
+
 	kmem_cache_destroy(rpc_inode_cachep);
 	unregister_filesystem(&rpc_pipe_fs_type);
 }

@@ -14,6 +14,7 @@
 #include <asm/segment.h>
 #include <asm/irqflags.h>
 #include <linux/linkage.h>
+#include <linux/err.h>
 
 /* Avoid __ASSEMBLER__'ifying <linux/audit.h> just for this.  */
 #include <linux/elf-em.h>
@@ -216,13 +217,14 @@ sysexit_from_sys_call:
 	TRACE_IRQS_ON
 	sti
 	movl %eax,%esi		/* second arg, syscall return value */
-	cmpl $0,%eax		/* is it < 0? */
-	setl %al		/* 1 if so, 0 if not */
+	cmpl $-MAX_ERRNO,%eax	/* is it an error ? */
+	jbe 1f
+	movslq %eax, %rsi	/* if error sign extend to 64 bits */
+1:	setbe %al		/* 1 if error, 0 if not */
 	movzbl %al,%edi		/* zero-extend that into %edi */
-	inc %edi /* first arg, 0->1(AUDITSC_SUCCESS), 1->2(AUDITSC_FAILURE) */
-	call audit_syscall_exit
+	call __audit_syscall_exit
 	GET_THREAD_INFO(%r10)
-	movl RAX-ARGOFFSET(%rsp),%eax	/* reload syscall return value */
+	movq RAX-ARGOFFSET(%rsp),%rax	/* reload syscall return value */
 	movl $(_TIF_ALLWORK_MASK & ~_TIF_SYSCALL_AUDIT),%edi
 	cli
 	TRACE_IRQS_OFF
@@ -623,7 +625,7 @@ ia32_sys_call_table:
 	.quad stub32_iopl		/* 110 */
 	.quad sys_vhangup
 	.quad quiet_ni_syscall	/* old "idle" system call */
-	.quad sys32_vm86_warning	/* vm86old */ 
+	.quad quiet_ni_syscall	/* vm86old */ 
 	.quad compat_sys_wait4
 	.quad sys_swapoff		/* 115 */
 	.quad compat_sys_sysinfo
@@ -676,7 +678,7 @@ ia32_sys_call_table:
 	.quad sys_mremap
 	.quad sys_setresuid16
 	.quad sys_getresuid16	/* 165 */
-	.quad sys32_vm86_warning	/* vm86 */ 
+	.quad quiet_ni_syscall	/* vm86 */ 
 	.quad quiet_ni_syscall	/* query_module */
 	.quad sys_poll
 	.quad compat_sys_nfsservctl
@@ -847,4 +849,37 @@ ia32_sys_call_table:
 	.quad compat_sys_pwritev
 	.quad compat_sys_rt_tgsigqueueinfo	/* 335 */
 	.quad sys_perf_event_open
+	.quad compat_sys_recvmmsg
+	.quad quiet_ni_syscall		/* sys_fanotify_init */
+	.quad quiet_ni_syscall		/* sys32_fanotify_mark */
+	.quad quiet_ni_syscall		/* sys_prlimit64  340 */
+	.quad sys_name_to_handle_at
+	.quad compat_sys_open_by_handle_at
+	.quad compat_sys_clock_adjtime
+	.quad sys_syncfs
+	.quad compat_sys_sendmmsg	/* 345 */
+	.quad sys_setns			/* setns */
+	.quad compat_sys_process_vm_readv
+	.quad compat_sys_process_vm_writev
+	.rept 500-(.-ia32_sys_call_table)/8
+		.quad sys_ni_syscall
+	.endr
+	.quad sys_fairsched_mknod	/* 500 */
+	.quad sys_fairsched_rmnod
+	.quad sys_fairsched_chwt
+	.quad sys_fairsched_mvpr
+	.quad sys_fairsched_rate
+	.quad sys_fairsched_vcpus	/* 505 */
+	.quad sys_fairsched_cpumask
+	.quad sys_fairsched_nodemask
+	.quad sys_ni_syscall
+	.quad sys_ni_syscall
+	.quad sys_getluid		/* 510 */
+	.quad sys_setluid
+	.quad compat_sys_setublimit
+	.quad compat_sys_ubstat
+	.quad sys_ni_syscall
+	.quad sys_ni_syscall		/* 515 */
+	.quad sys_lchmod
+	.quad compat_sys_lutime
 ia32_syscall_end:

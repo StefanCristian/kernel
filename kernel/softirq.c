@@ -25,6 +25,8 @@
 #include <linux/smp.h>
 #include <linux/tick.h>
 
+#include <bc/beancounter.h>
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/irq.h>
 
@@ -206,10 +208,14 @@ EXPORT_SYMBOL(local_bh_enable_ip);
 
 asmlinkage void __do_softirq(void)
 {
+	struct user_beancounter *ub;
 	struct softirq_action *h;
 	__u32 pending;
 	int max_restart = MAX_SOFTIRQ_RESTART;
 	int cpu;
+	struct ve_struct *envid;
+
+	envid = set_exec_env(get_ve0());
 
 	pending = local_softirq_pending();
 	account_system_vtime(current);
@@ -227,6 +233,7 @@ restart:
 
 	h = softirq_vec;
 
+	ub = set_exec_ub(get_ub0());
 	do {
 		if (pending & 1) {
 			int prev_count = preempt_count();
@@ -249,6 +256,7 @@ restart:
 		h++;
 		pending >>= 1;
 	} while (pending);
+	(void)set_exec_ub(ub);
 
 	local_irq_disable();
 
@@ -262,6 +270,7 @@ restart:
 	lockdep_softirq_exit();
 
 	account_system_vtime(current);
+	(void)set_exec_env(envid);
 	__local_bh_enable(SOFTIRQ_OFFSET);
 }
 
@@ -321,6 +330,7 @@ void irq_exit(void)
 {
 	account_system_vtime(current);
 	trace_hardirq_exit();
+	restore_context();
 	sub_preempt_count(IRQ_EXIT_OFFSET);
 	if (!in_interrupt() && local_softirq_pending())
 		invoke_softirq();
@@ -724,7 +734,6 @@ static int ksoftirqd(void * __bind_cpu)
 {
 	set_current_state(TASK_INTERRUPTIBLE);
 
-	current->flags |= PF_KSOFTIRQD;
 	while (!kthread_should_stop()) {
 		preempt_disable();
 		if (!local_softirq_pending()) {
@@ -903,6 +912,35 @@ int on_each_cpu(void (*func) (void *info), void *info, int wait)
 	return ret;
 }
 EXPORT_SYMBOL(on_each_cpu);
+
+/**
+ * on_each_cpu_mask(): Run a function on processors specified by
+ * cpumask, which may include the local processor.
+ * @mask: The set of cpus to run on (only runs on online subset).
+ * @func: The function to run. This must be fast and non-blocking.
+ * @info: An arbitrary pointer to pass to the function.
+ * @wait: If true, wait (atomically) until function has completed
+ *        on other CPUs.
+ *
+ * If @wait is true, then returns once @func has returned.
+ *
+ * You must not call this function with disabled interrupts or
+ * from a hardware interrupt handler or from a bottom half handler.
+ */
+void on_each_cpu_mask(const struct cpumask *mask, void (*func) (void *info),
+			void *info, bool wait)
+{
+	int cpu = get_cpu();
+
+	smp_call_function_many(mask, func, info, wait);
+	if (cpumask_test_cpu(cpu, mask)) {
+		local_irq_disable();
+		func(info);
+		local_irq_enable();
+	}
+	put_cpu();
+}
+EXPORT_SYMBOL(on_each_cpu_mask);
 #endif
 
 /*

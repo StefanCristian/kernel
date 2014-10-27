@@ -31,6 +31,7 @@
  */
 
 #include <linux/pagemap.h>
+#include <linux/quotaops.h>
 #include "ext2.h"
 #include "xattr.h"
 #include "acl.h"
@@ -262,6 +263,8 @@ static int ext2_unlink(struct inode * dir, struct dentry *dentry)
 	struct page * page;
 	int err = -ENOENT;
 
+	vfs_dq_init(inode);
+
 	de = ext2_find_entry (dir, &dentry->d_name, &page);
 	if (!de)
 		goto out;
@@ -304,6 +307,9 @@ static int ext2_rename (struct inode * old_dir, struct dentry * old_dentry,
 	struct ext2_dir_entry_2 * old_de;
 	int err = -ENOENT;
 
+	if (new_inode)
+		vfs_dq_init(new_inode);
+
 	old_de = ext2_find_entry (old_dir, &old_dentry->d_name, &old_page);
 	if (!old_de)
 		goto out;
@@ -327,6 +333,7 @@ static int ext2_rename (struct inode * old_dir, struct dentry * old_dentry,
 		new_de = ext2_find_entry (new_dir, &new_dentry->d_name, &new_page);
 		if (!new_de)
 			goto out_dir;
+		inode_inc_link_count(old_inode);
 		ext2_set_link(new_dir, new_de, new_page, old_inode, 1);
 		new_inode->i_ctime = CURRENT_TIME_SEC;
 		if (dir_de)
@@ -338,9 +345,12 @@ static int ext2_rename (struct inode * old_dir, struct dentry * old_dentry,
 			if (new_dir->i_nlink >= EXT2_LINK_MAX)
 				goto out_dir;
 		}
+		inode_inc_link_count(old_inode);
 		err = ext2_add_link(new_dentry, old_inode);
-		if (err)
+		if (err) {
+			inode_dec_link_count(old_inode);
 			goto out_dir;
+		}
 		if (dir_de)
 			inode_inc_link_count(new_dir);
 	}
@@ -348,11 +358,12 @@ static int ext2_rename (struct inode * old_dir, struct dentry * old_dentry,
 	/*
 	 * Like most other Unix systems, set the ctime for inodes on a
  	 * rename.
+	 * inode_dec_link_count() will mark the inode dirty.
 	 */
 	old_inode->i_ctime = CURRENT_TIME_SEC;
-	mark_inode_dirty(old_inode);
 
 	ext2_delete_entry (old_de, old_page);
+	inode_dec_link_count(old_inode);
 
 	if (dir_de) {
 		if (old_dir != new_dir)

@@ -10,6 +10,7 @@
 #include <linux/in6.h>
 #include <asm/atomic.h>
 
+struct ve_struct;
 struct flowi {
 	int	oif;
 	int	iif;
@@ -77,6 +78,9 @@ struct flowi {
 #define fl_icmp_code	uli_u.icmpt.code
 #define fl_ipsec_spi	uli_u.spi
 #define fl_mh_type	uli_u.mht.type
+#ifdef CONFIG_VE
+	struct ve_struct *owner_env;
+#endif
 	__u32           secid;	/* used by xfrm; see secid.txt */
 } __attribute__((__aligned__(BITS_PER_LONG/8)));
 
@@ -86,12 +90,28 @@ struct flowi {
 
 struct net;
 struct sock;
-typedef int (*flow_resolve_t)(struct net *net, struct flowi *key, u16 family,
-			      u8 dir, void **objp, atomic_t **obj_refp);
+struct flow_cache_ops;
 
-extern void *flow_cache_lookup(struct net *net, struct flowi *key, u16 family,
-			       u8 dir, flow_resolve_t resolver);
+struct flow_cache_object {
+	const struct flow_cache_ops *ops;
+};
+
+struct flow_cache_ops {
+	struct flow_cache_object *(*get)(struct flow_cache_object *);
+	int (*check)(struct flow_cache_object *);
+	void (*delete)(struct flow_cache_object *);
+};
+
+typedef struct flow_cache_object *(*flow_resolve_t)(
+		struct net *net, struct flowi *key, u16 family,
+		u8 dir, struct flow_cache_object *oldobj, void *ctx);
+
+extern struct flow_cache_object *flow_cache_lookup(
+		struct net *net, struct flowi *key, u16 family,
+		u8 dir, flow_resolve_t resolver, void *ctx);
+
 extern void flow_cache_flush(void);
+extern void flow_cache_flush_deferred(void);
 extern atomic_t flow_cache_genid;
 
 static inline int flow_cache_uli_match(struct flowi *fl1, struct flowi *fl2)

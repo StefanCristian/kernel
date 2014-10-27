@@ -69,7 +69,12 @@
 #include <linux/kmemtrace.h>
 #include <linux/sfi.h>
 #include <linux/shmem_fs.h>
+#include <linux/perf_event.h>
+#include <linux/pram.h>
+#include <linux/kexec.h>
 #include <trace/boot.h>
+
+#include <bc/beancounter.h>
 
 #include <asm/io.h>
 #include <asm/bugs.h>
@@ -101,6 +106,14 @@ extern void tc_init(void);
 enum system_states system_state __read_mostly;
 EXPORT_SYMBOL(system_state);
 
+#ifdef CONFIG_VE
+extern void init_ve_system(void);
+extern void init_ve0(void);
+#else
+#define init_ve_system()		do { } while (0)
+#define init_ve0()			do { } while (0)
+#endif
+
 /*
  * Boot command-line arguments
  */
@@ -124,7 +137,9 @@ static char *ramdisk_execute_command;
 
 #ifdef CONFIG_SMP
 /* Setup configured maximum number of CPUs to activate */
-unsigned int __initdata setup_max_cpus = NR_CPUS;
+unsigned int setup_max_cpus = NR_CPUS;
+EXPORT_SYMBOL(setup_max_cpus);
+
 
 /*
  * Setup routine for controlling SMP activation
@@ -148,6 +163,20 @@ static int __init nosmp(char *str)
 }
 
 early_param("nosmp", nosmp);
+
+/* this is hard limit */
+static int __init nrcpus(char *str)
+{
+	int nr_cpus;
+
+	get_option(&str, &nr_cpus);
+	if (nr_cpus > 0 && nr_cpus < nr_cpu_ids)
+		nr_cpu_ids = nr_cpus;
+
+	return 0;
+}
+
+early_param("nr_cpus", nrcpus);
 
 static int __init maxcpus(char *str)
 {
@@ -182,6 +211,21 @@ static int __init set_reset_devices(char *str)
 }
 
 __setup("reset_devices", set_reset_devices);
+
+unsigned int usevirtefi = 1;
+static int __init set_virt_efi(char *str)
+{
+	usevirtefi = 1;
+	return 1;
+}
+__setup("virtefi", set_virt_efi);
+
+static int __init set_phys_efi(char *str)
+{
+	usevirtefi = 0;
+	return 1;
+}
+__setup("physefi", set_phys_efi);
 
 static char * argv_init[MAX_INIT_ARGS+2] = { "init", NULL, };
 char * envp_init[MAX_INIT_ENVS+2] = { "HOME=/", "TERM=linux", NULL, };
@@ -364,6 +408,10 @@ static void __init setup_nr_cpu_ids(void)
 	nr_cpu_ids = find_last_bit(cpumask_bits(cpu_possible_mask),NR_CPUS) + 1;
 }
 
+#include <linux/ext3_fs_i.h>
+#include <linux/skbuff.h>
+#include <linux/sched.h>
+
 /* Called by boot processor to activate the rest. */
 static void __init smp_init(void)
 {
@@ -380,6 +428,15 @@ static void __init smp_init(void)
 	/* Any cleanup work */
 	printk(KERN_INFO "Brought up %ld CPUs\n", (long)num_online_cpus());
 	smp_cpus_done(setup_max_cpus);
+
+	printk(KERN_DEBUG "sizeof(vma)=%u bytes\n", (unsigned int) sizeof(struct vm_area_struct));
+	printk(KERN_DEBUG "sizeof(page)=%u bytes\n", (unsigned int) sizeof(struct page));
+	printk(KERN_DEBUG "sizeof(inode)=%u bytes\n", (unsigned int) sizeof(struct inode));
+	printk(KERN_DEBUG "sizeof(dentry)=%u bytes\n", (unsigned int) sizeof(struct dentry));
+	printk(KERN_DEBUG "sizeof(ext3inode)=%u bytes\n", (unsigned int) sizeof(struct ext3_inode_info));
+	printk(KERN_DEBUG "sizeof(buffer_head)=%u bytes\n", (unsigned int) sizeof(struct buffer_head));
+	printk(KERN_DEBUG "sizeof(skbuff)=%u bytes\n", (unsigned int) sizeof(struct sk_buff));
+	printk(KERN_DEBUG "sizeof(task_struct)=%u bytes\n", (unsigned int) sizeof(struct task_struct));
 }
 
 #endif
@@ -556,9 +613,12 @@ asmlinkage void __init start_kernel(void)
 	setup_command_line(command_line);
 	setup_nr_cpu_ids();
 	setup_per_cpu_areas();
+	init_ve0();
+	ub_init_early();
+	kstat_init();
 	smp_prepare_boot_cpu();	/* arch-specific boot-cpu hooks */
 
-	build_all_zonelists();
+	build_all_zonelists(NULL);
 	page_alloc_init();
 
 	printk(KERN_NOTICE "Kernel command line: %s\n", boot_command_line);
@@ -570,11 +630,14 @@ asmlinkage void __init start_kernel(void)
 	 * These use large bootmem allocations and must precede
 	 * kmem_cache_init()
 	 */
+	setup_log_buf(NULL);
 	pidhash_init();
 	vfs_caches_init_early();
 	sort_main_extable();
 	trap_init();
 	mm_init();
+	pram_init();
+	kexec_crash_init();
 	/*
 	 * Set up the scheduler prior starting any interrupts (such as the
 	 * timer interrupt). Full topology setup happens at smp_init()
@@ -591,6 +654,8 @@ asmlinkage void __init start_kernel(void)
 				"enabled *very* early, fixing it\n");
 		local_irq_disable();
 	}
+	idr_init_cache();
+	perf_event_init();
 	rcu_init();
 	/* init some links before init_ISA_irqs() */
 	early_irq_init();
@@ -602,6 +667,7 @@ asmlinkage void __init start_kernel(void)
 	timekeeping_init();
 	time_init();
 	profile_init();
+	call_function_init();
 	if (!irqs_disabled())
 		printk(KERN_CRIT "start_kernel(): bug: interrupts were "
 				 "enabled early\n");
@@ -609,7 +675,7 @@ asmlinkage void __init start_kernel(void)
 	local_irq_enable();
 
 	/* Interrupts are enabled now so all GFP allocations are safe. */
-	set_gfp_allowed_mask(__GFP_BITS_MASK);
+	gfp_allowed_mask = __GFP_BITS_MASK;
 
 	kmem_cache_init_late();
 
@@ -644,9 +710,8 @@ asmlinkage void __init start_kernel(void)
 	page_cgroup_init();
 	enable_debug_pagealloc();
 	kmemtrace_init();
-	kmemleak_init();
 	debug_objects_mem_init();
-	idr_init_cache();
+	kmemleak_init();
 	setup_per_cpu_pageset();
 	numa_policy_init();
 	if (late_time_init)
@@ -656,18 +721,23 @@ asmlinkage void __init start_kernel(void)
 	pidmap_init();
 	anon_vma_init();
 #ifdef CONFIG_X86
-	if (efi_enabled)
-		efi_enter_virtual_mode();
+	if (efi_enabled) {
+		if (usevirtefi)
+			efi_enter_virtual_mode();
+		else
+			efi_setup_physical_mode();
+	}
 #endif
 	thread_info_cache_init();
 	cred_init();
 	fork_init(totalram_pages);
 	proc_caches_init();
+	ub_init_late();
 	buffer_init();
 	key_init();
+	radix_tree_init();
 	security_init();
 	vfs_caches_init(totalram_pages);
-	radix_tree_init();
 	signals_init();
 	/* rootfs populating might need page-writeback */
 	page_writeback_init();
@@ -776,10 +846,12 @@ static void __init do_initcalls(void)
  */
 static void __init do_basic_setup(void)
 {
+	init_ve_system();
 	init_workqueues();
+	cgroup_wq_init();
 	cpuset_init_smp();
 	usermodehelper_init();
-	init_tmpfs();
+	shmem_init();
 	driver_init();
 	init_irq_proc();
 	do_ctors();
@@ -819,8 +891,6 @@ static noinline int init_post(void)
 
 	(void) sys_dup(0);
 	(void) sys_dup(0);
-
-	current->signal->flags |= SIGNAL_UNKILLABLE;
 
 	if (ramdisk_execute_command) {
 		run_init_process(ramdisk_execute_command);
@@ -863,15 +933,6 @@ static int __init kernel_init(void * unused)
 	 * init can run on any cpu.
 	 */
 	set_cpus_allowed_ptr(current, cpu_all_mask);
-	/*
-	 * Tell the world that we're going to be the grim
-	 * reaper of innocent orphaned children.
-	 *
-	 * We don't want people to have to make incorrect
-	 * assumptions about where in the task array this
-	 * can be found.
-	 */
-	init_pid_ns.child_reaper = current;
 
 	cad_pid = task_pid(current);
 
@@ -879,6 +940,7 @@ static int __init kernel_init(void * unused)
 
 	do_pre_smp_initcalls();
 	start_boot_trace();
+	lockup_detector_init();
 
 	smp_init();
 	sched_init_smp();

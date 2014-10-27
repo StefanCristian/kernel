@@ -7,6 +7,7 @@
  *		Initial version.
  */
 
+#include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/file.h>
 #include <linux/fs.h>
@@ -17,6 +18,7 @@
 #include <linux/fadvise.h>
 #include <linux/writeback.h>
 #include <linux/syscalls.h>
+#include <linux/swap.h>
 
 #include <asm/unistd.h>
 
@@ -24,30 +26,15 @@
  * POSIX_FADV_WILLNEED could set PG_Referenced, and POSIX_FADV_NOREUSE could
  * deactivate the pages and clear PG_Referenced.
  */
-SYSCALL_DEFINE(fadvise64_64)(int fd, loff_t offset, loff_t len, int advice)
+int generic_fadvise(struct file* file, loff_t offset, loff_t len, int advice)
 {
-	struct file *file = fget(fd);
-	struct address_space *mapping;
+	struct address_space *mapping = file->f_mapping;
 	struct backing_dev_info *bdi;
 	loff_t endbyte;			/* inclusive */
 	pgoff_t start_index;
 	pgoff_t end_index;
 	unsigned long nrpages;
 	int ret = 0;
-
-	if (!file)
-		return -EBADF;
-
-	if (S_ISFIFO(file->f_path.dentry->d_inode->i_mode)) {
-		ret = -ESPIPE;
-		goto out;
-	}
-
-	mapping = file->f_mapping;
-	if (!mapping || len < 0) {
-		ret = -EINVAL;
-		goto out;
-	}
 
 	if (mapping->a_ops->get_xip_mem) {
 		switch (advice) {
@@ -117,19 +104,60 @@ SYSCALL_DEFINE(fadvise64_64)(int fd, loff_t offset, loff_t len, int advice)
 		break;
 	case POSIX_FADV_DONTNEED:
 		if (!bdi_write_congested(mapping->backing_dev_info))
-			filemap_flush(mapping);
+			__filemap_fdatawrite_range(mapping, offset, endbyte,
+						   WB_SYNC_NONE);
 
 		/* First and last FULL page! */
 		start_index = (offset+(PAGE_CACHE_SIZE-1)) >> PAGE_CACHE_SHIFT;
 		end_index = (endbyte >> PAGE_CACHE_SHIFT);
 
-		if (end_index >= start_index)
-			invalidate_mapping_pages(mapping, start_index,
+		if (end_index >= start_index) {
+			unsigned long count = invalidate_mapping_pages(mapping,
+						start_index, end_index);
+
+			/*
+			 * If fewer pages were invalidated than expected then
+			 * it is possible that some of the pages were on
+			 * a per-cpu pagevec for a remote CPU. Drain all
+			 * pagevecs and try again.
+			 */
+			if (count < (end_index - start_index + 1)) {
+				lru_add_drain_all();
+				invalidate_mapping_pages(mapping, start_index,
 						end_index);
+			}
+		}
 		break;
 	default:
 		ret = -EINVAL;
 	}
+out:
+	return ret;
+}
+EXPORT_SYMBOL(generic_fadvise);
+
+SYSCALL_DEFINE(fadvise64_64)(int fd, loff_t offset, loff_t len, int advice)
+{
+	struct file *file = fget(fd);
+	int (*fadvise)(struct file *,loff_t, loff_t, int) = generic_fadvise;
+	int ret = 0;
+
+	if (!file)
+		return -EBADF;
+
+	if (S_ISFIFO(file->f_path.dentry->d_inode->i_mode)) {
+		ret = -ESPIPE;
+		goto out;
+	}
+
+	if (!file->f_mapping || len < 0) {
+		ret = -EINVAL;
+		goto out;
+	}
+	if (file->f_op && file->f_op->fadvise)
+		fadvise = file->f_op->fadvise;
+
+	ret = fadvise(file, offset, len, advice);
 out:
 	fput(file);
 	return ret;

@@ -40,6 +40,20 @@ SYSCALL_DEFINE2(utime, char __user *, filename, struct utimbuf __user *, times)
 
 #endif
 
+SYSCALL_DEFINE2(lutime, char __user *, filename, struct utimbuf __user *, times)
+{
+	struct timespec tv[2];
+
+	if (times) {
+		if (get_user(tv[0].tv_sec, &times->actime) ||
+		    get_user(tv[1].tv_sec, &times->modtime))
+			return -EFAULT;
+		tv[0].tv_nsec = 0;
+		tv[1].tv_nsec = 0;
+	}
+	return do_utimes(AT_FDCWD, filename, times ? tv : NULL, AT_SYMLINK_NOFOLLOW);
+}
+
 static bool nsec_valid(long nsec)
 {
 	if (nsec == UTIME_OMIT || nsec == UTIME_NOW)
@@ -157,13 +171,17 @@ long do_utimes(int dfd, char __user *filename, struct timespec *times, int flags
 
 		if (!(flags & AT_SYMLINK_NOFOLLOW))
 			lookup_flags |= LOOKUP_FOLLOW;
-
+retry:
 		error = user_path_at(dfd, filename, lookup_flags, &path);
 		if (error)
 			goto out;
 
 		error = utimes_common(&path, times);
 		path_put(&path);
+		if (retry_estale(error, lookup_flags)) {
+			lookup_flags |= LOOKUP_REVAL;
+			goto retry;
+		}
 	}
 
 out:

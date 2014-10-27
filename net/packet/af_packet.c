@@ -79,10 +79,17 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/mutex.h>
+#include <linux/if_vlan.h>
+#include <linux/errqueue.h>
+#include <linux/net_tstamp.h>
+
+#include <bc/net.h>
 
 #ifdef CONFIG_INET
 #include <net/inet_common.h>
 #endif
+
+#include <linux/cpt_image.h>
 
 /*
    Assumptions:
@@ -204,6 +211,7 @@ struct packet_sock {
 	unsigned int		tp_reserve;
 	unsigned int		tp_loss:1;
 #endif
+	unsigned int		tp_tstamp;
 };
 
 struct packet_skb_cb {
@@ -321,6 +329,8 @@ static inline struct packet_sock *pkt_sk(struct sock *sk)
 
 static void packet_sock_destruct(struct sock *sk)
 {
+	skb_queue_purge(&sk->sk_error_queue);
+
 	WARN_ON(atomic_read(&sk->sk_rmem_alloc));
 	WARN_ON(atomic_read(&sk->sk_wmem_alloc));
 
@@ -492,6 +502,9 @@ static int packet_sendmsg_spkt(struct kiocb *iocb, struct socket *sock,
 	skb->priority = sk->sk_priority;
 	if (err)
 		goto out_free;
+	err = sock_tx_timestamp(msg, sk, skb_tx(skb));
+	if (err < 0)
+		goto out_free;
 
 	/*
 	 *	Now send it
@@ -554,6 +567,8 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,
 	if (dev_net(dev) != sock_net(sk))
 		goto drop;
 
+	skb_orphan(skb);
+
 	skb->dev = dev;
 
 	if (dev->header_ops) {
@@ -580,8 +595,7 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,
 	if (snaplen > res)
 		snaplen = res;
 
-	if (atomic_read(&sk->sk_rmem_alloc) + skb->truesize >=
-	    (unsigned)sk->sk_rcvbuf)
+	if (atomic_read(&sk->sk_rmem_alloc) >= sk->sk_rcvbuf)
 		goto drop_n_acct;
 
 	if (skb_shared(skb)) {
@@ -617,6 +631,9 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,
 	if (pskb_trim(skb, snaplen))
 		goto drop_n_acct;
 
+	if (ub_sockrcvbuf_charge(sk, skb))
+		goto drop_n_acct;
+
 	skb_set_owner_r(skb, sk);
 	skb->dev = NULL;
 	skb_dst_drop(skb);
@@ -626,15 +643,14 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,
 
 	spin_lock(&sk->sk_receive_queue.lock);
 	po->stats.tp_packets++;
+	skb->dropcount = atomic_read(&sk->sk_drops);
 	__skb_queue_tail(&sk->sk_receive_queue, skb);
 	spin_unlock(&sk->sk_receive_queue.lock);
 	sk->sk_data_ready(sk, skb->len);
 	return 0;
 
 drop_n_acct:
-	spin_lock(&sk->sk_receive_queue.lock);
-	po->stats.tp_drops++;
-	spin_unlock(&sk->sk_receive_queue.lock);
+	po->stats.tp_drops = atomic_inc_return(&sk->sk_drops);
 
 drop_n_restore:
 	if (skb_head != skb->data && skb_shared(skb)) {
@@ -666,6 +682,7 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,
 	struct sk_buff *copy_skb = NULL;
 	struct timeval tv;
 	struct timespec ts;
+	struct skb_shared_hwtstamps *shhwtstamps = skb_hwtstamps(skb);
 
 	if (skb->pkt_type == PACKET_LOOPBACK)
 		goto drop;
@@ -675,6 +692,8 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,
 
 	if (dev_net(dev) != sock_net(sk))
 		goto drop;
+
+	skb_orphan(skb);
 
 	if (dev->header_ops) {
 		if (sk->sk_type != SOCK_DGRAM)
@@ -709,8 +728,7 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,
 
 	if (macoff + snaplen > po->rx_ring.frame_size) {
 		if (po->copy_thresh &&
-		    atomic_read(&sk->sk_rmem_alloc) + skb->truesize <
-		    (unsigned)sk->sk_rcvbuf) {
+		    atomic_read(&sk->sk_rmem_alloc) < sk->sk_rcvbuf) {
 			if (skb_shared(skb)) {
 				copy_skb = skb_clone(skb, GFP_ATOMIC);
 			} else {
@@ -723,6 +741,12 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,
 		snaplen = po->rx_ring.frame_size - macoff;
 		if ((int)snaplen < 0)
 			snaplen = 0;
+	}
+
+	if (copy_skb &&
+	    ub_sockrcvbuf_charge(sk, copy_skb)) {
+		spin_lock(&sk->sk_receive_queue.lock);
+		goto ring_is_full;
 	}
 
 	spin_lock(&sk->sk_receive_queue.lock);
@@ -747,7 +771,13 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,
 		h.h1->tp_snaplen = snaplen;
 		h.h1->tp_mac = macoff;
 		h.h1->tp_net = netoff;
-		if (skb->tstamp.tv64)
+		if ((po->tp_tstamp & SOF_TIMESTAMPING_SYS_HARDWARE)
+				&& shhwtstamps->syststamp.tv64)
+			tv = ktime_to_timeval(shhwtstamps->syststamp);
+		else if ((po->tp_tstamp & SOF_TIMESTAMPING_RAW_HARDWARE)
+				&& shhwtstamps->hwtstamp.tv64)
+			tv = ktime_to_timeval(shhwtstamps->hwtstamp);
+		else if (skb->tstamp.tv64)
 			tv = ktime_to_timeval(skb->tstamp);
 		else
 			do_gettimeofday(&tv);
@@ -760,13 +790,19 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,
 		h.h2->tp_snaplen = snaplen;
 		h.h2->tp_mac = macoff;
 		h.h2->tp_net = netoff;
-		if (skb->tstamp.tv64)
+		if ((po->tp_tstamp & SOF_TIMESTAMPING_SYS_HARDWARE)
+				&& shhwtstamps->syststamp.tv64)
+			ts = ktime_to_timespec(shhwtstamps->syststamp);
+		else if ((po->tp_tstamp & SOF_TIMESTAMPING_RAW_HARDWARE)
+				&& shhwtstamps->hwtstamp.tv64)
+			ts = ktime_to_timespec(shhwtstamps->hwtstamp);
+		else if (skb->tstamp.tv64)
 			ts = ktime_to_timespec(skb->tstamp);
 		else
 			getnstimeofday(&ts);
 		h.h2->tp_sec = ts.tv_sec;
 		h.h2->tp_nsec = ts.tv_nsec;
-		h.h2->tp_vlan_tci = skb->vlan_tci;
+		h.h2->tp_vlan_tci = vlan_tx_tag_get(skb);
 		h.h2->tp_padding = 0;
 		hdrlen = sizeof(*h.h2);
 		break;
@@ -828,7 +864,6 @@ static void tpacket_destruct_skb(struct sk_buff *skb)
 
 	if (likely(po->tx_ring.pg_vec)) {
 		ph = skb_shinfo(skb)->destructor_arg;
-		BUG_ON(__packet_get_status(po, ph) != TP_STATUS_SENDING);
 		BUG_ON(atomic_read(&po->tx_ring.pending) == 0);
 		atomic_dec(&po->tx_ring.pending);
 		__packet_set_status(po, ph, TP_STATUS_AVAILABLE);
@@ -1063,6 +1098,26 @@ out:
 }
 #endif
 
+static inline struct sk_buff *packet_alloc_skb(struct sock *sk, size_t prepad,
+					       size_t reserve, size_t len,
+					       size_t linear, int noblock,
+					       int *err)
+{
+	struct sk_buff *skb;
+
+	linear = len;
+	skb = sock_alloc_send_skb(sk, prepad + linear, noblock, err);
+	if (!skb)
+		return NULL;
+
+	skb_reserve(skb, reserve);
+	skb_put(skb, linear);
+	skb->data_len = len - linear;
+	skb->len += len - linear;
+
+	return skb;
+}
+
 static int packet_snd(struct socket *sock,
 			  struct msghdr *msg, size_t len)
 {
@@ -1073,6 +1128,7 @@ static int packet_snd(struct socket *sock,
 	__be16 proto;
 	unsigned char *addr;
 	int ifindex, err, reserve = 0;
+	int offset = 0;
 
 	/*
 	 *	Get and verify the address.
@@ -1111,22 +1167,26 @@ static int packet_snd(struct socket *sock,
 	if (len > dev->mtu+reserve)
 		goto out_unlock;
 
-	skb = sock_alloc_send_skb(sk, len + LL_ALLOCATED_SPACE(dev),
-				msg->msg_flags & MSG_DONTWAIT, &err);
+	err = -ENOBUFS;
+	skb = packet_alloc_skb(sk, LL_ALLOCATED_SPACE(dev),
+			       LL_RESERVED_SPACE(dev), len, 0,
+			       msg->msg_flags & MSG_DONTWAIT, &err);
 	if (skb == NULL)
 		goto out_unlock;
 
-	skb_reserve(skb, LL_RESERVED_SPACE(dev));
-	skb_reset_network_header(skb);
+	skb_set_network_header(skb, reserve);
 
 	err = -EINVAL;
 	if (sock->type == SOCK_DGRAM &&
-	    dev_hard_header(skb, dev, ntohs(proto), addr, NULL, len) < 0)
+	    (offset = dev_hard_header(skb, dev, ntohs(proto), addr, NULL, len)) < 0)
 		goto out_free;
 
 	/* Returns -EFAULT on error */
-	err = memcpy_fromiovec(skb_put(skb, len), msg->msg_iov, len);
+	err = skb_copy_datagram_from_iovec(skb, offset, msg->msg_iov, 0, len);
 	if (err)
+		goto out_free;
+	err = sock_tx_timestamp(msg, sk, skb_tx(skb));
+	if (err < 0)
 		goto out_free;
 
 	skb->protocol = proto;
@@ -1238,32 +1298,39 @@ static int packet_release(struct socket *sock)
  *	Attach a packet hook.
  */
 
-static int packet_do_bind(struct sock *sk, struct net_device *dev, __be16 protocol)
+static int packet_do_bind(struct sock *sk, struct net_device *dev, __be16 proto)
 {
 	struct packet_sock *po = pkt_sk(sk);
-	/*
-	 *	Detach an existing hook if present.
-	 */
+	const struct net_device *dev_curr;
+	__be16 proto_curr;
+	bool need_rehook;
 
 	lock_sock(sk);
-
 	spin_lock(&po->bind_lock);
-	if (po->running) {
-		__sock_put(sk);
-		po->running = 0;
-		po->num = 0;
-		spin_unlock(&po->bind_lock);
-		dev_remove_pack(&po->prot_hook);
-		spin_lock(&po->bind_lock);
+
+	proto_curr = po->prot_hook.type;
+	dev_curr = po->prot_hook.dev;
+
+	need_rehook = proto_curr != proto || dev_curr != dev;
+
+	if (need_rehook) {
+		if (po->running) {
+			__sock_put(sk);
+			po->running = 0;
+			po->num = 0;
+			spin_unlock(&po->bind_lock);
+			dev_remove_pack(&po->prot_hook);
+			spin_lock(&po->bind_lock);
+		}
+
+		po->num = proto;
+		po->prot_hook.type = proto;
+		po->prot_hook.dev = dev;
+
+		po->ifindex = dev ? dev->ifindex : 0;
 	}
 
-	po->num = protocol;
-	po->prot_hook.type = protocol;
-	po->prot_hook.dev = dev;
-
-	po->ifindex = dev ? dev->ifindex : 0;
-
-	if (protocol == 0)
+	if (proto == 0 || !need_rehook)
 		goto out_unlock;
 
 	if (!dev || (dev->flags & IFF_UP)) {
@@ -1351,7 +1418,8 @@ static struct proto packet_proto = {
  *	Create a packet of type SOCK_PACKET.
  */
 
-static int packet_create(struct net *net, struct socket *sock, int protocol)
+static int packet_create(struct net *net, struct socket *sock, int protocol,
+			 int kern)
 {
 	struct sock *sk;
 	struct packet_sock *po;
@@ -1370,6 +1438,8 @@ static int packet_create(struct net *net, struct socket *sock, int protocol)
 	sk = sk_alloc(net, PF_PACKET, GFP_KERNEL, &packet_proto);
 	if (sk == NULL)
 		goto out;
+	if (ub_other_sock_charge(sk, kern))
+		goto out_free;
 
 	sock->ops = &packet_ops;
 	if (sock->type == SOCK_PACKET)
@@ -1409,6 +1479,54 @@ static int packet_create(struct net *net, struct socket *sock, int protocol)
 	sock_prot_inuse_add(net, &packet_proto, 1);
 	write_unlock_bh(&net->packet.sklist_lock);
 	return 0;
+
+out_free:
+	sk_free(sk);
+out:
+	return err;
+}
+
+static int packet_recv_error(struct sock *sk, struct msghdr *msg, int len)
+{
+	struct sock_exterr_skb *serr;
+	struct sk_buff *skb, *skb2;
+	int copied, err;
+
+	err = -EAGAIN;
+	skb = skb_dequeue(&sk->sk_error_queue);
+	if (skb == NULL)
+		goto out;
+
+	copied = skb->len;
+	if (copied > len) {
+		msg->msg_flags |= MSG_TRUNC;
+		copied = len;
+	}
+	err = skb_copy_datagram_iovec(skb, 0, msg->msg_iov, copied);
+	if (err)
+		goto out_free_skb;
+
+	sock_recv_timestamp(msg, sk, skb);
+
+	serr = SKB_EXT_ERR(skb);
+	put_cmsg(msg, SOL_PACKET, PACKET_TX_TIMESTAMP,
+		 sizeof(serr->ee), &serr->ee);
+
+	msg->msg_flags |= MSG_ERRQUEUE;
+	err = copied;
+
+	/* Reset and regenerate socket error */
+	spin_lock_bh(&sk->sk_error_queue.lock);
+	sk->sk_err = 0;
+	if ((skb2 = skb_peek(&sk->sk_error_queue)) != NULL) {
+		sk->sk_err = SKB_EXT_ERR(skb2)->ee.ee_errno;
+		spin_unlock_bh(&sk->sk_error_queue.lock);
+		sk->sk_error_report(sk);
+	} else
+		spin_unlock_bh(&sk->sk_error_queue.lock);
+
+out_free_skb:
+	kfree_skb(skb);
 out:
 	return err;
 }
@@ -1424,17 +1542,22 @@ static int packet_recvmsg(struct kiocb *iocb, struct socket *sock,
 	struct sock *sk = sock->sk;
 	struct sk_buff *skb;
 	int copied, err;
-	struct sockaddr_ll *sll;
 
 	err = -EINVAL;
-	if (flags & ~(MSG_PEEK|MSG_DONTWAIT|MSG_TRUNC|MSG_CMSG_COMPAT))
+	if (flags & ~(MSG_PEEK|MSG_DONTWAIT|MSG_TRUNC|MSG_CMSG_COMPAT|MSG_ERRQUEUE))
 		goto out;
 
+	msg->msg_namelen = 0;
 #if 0
 	/* What error should we return now? EUNATTACH? */
 	if (pkt_sk(sk)->ifindex < 0)
 		return -ENODEV;
 #endif
+
+	if (flags & MSG_ERRQUEUE) {
+		err = packet_recv_error(sk, msg, len);
+		goto out;
+	}
 
 	/*
 	 *	Call the generic datagram receiver. This handles all sorts
@@ -1456,22 +1579,10 @@ static int packet_recvmsg(struct kiocb *iocb, struct socket *sock,
 	if (skb == NULL)
 		goto out;
 
-	/*
-	 *	If the address length field is there to be filled in, we fill
-	 *	it in now.
+	/* You lose any data beyond the buffer you gave. If it worries
+	 * a user program they can ask the device for its MTU
+	 * anyway.
 	 */
-
-	sll = &PACKET_SKB_CB(skb)->sa.ll;
-	if (sock->type == SOCK_PACKET)
-		msg->msg_namelen = sizeof(struct sockaddr_pkt);
-	else
-		msg->msg_namelen = sll->sll_halen + offsetof(struct sockaddr_ll, sll_addr);
-
-	/*
-	 *	You lose any data beyond the buffer you gave. If it worries a
-	 *	user program they can ask the device for its MTU anyway.
-	 */
-
 	copied = skb->len;
 	if (copied > len) {
 		copied = len;
@@ -1482,11 +1593,22 @@ static int packet_recvmsg(struct kiocb *iocb, struct socket *sock,
 	if (err)
 		goto out_free;
 
-	sock_recv_timestamp(msg, sk, skb);
+	sock_recv_ts_and_drops(msg, sk, skb);
 
-	if (msg->msg_name)
+	if (msg->msg_name) {
+		/* If the address length field is there to be filled
+		 * in, we fill it in now.
+		 */
+		if (sock->type == SOCK_PACKET) {
+			msg->msg_namelen = sizeof(struct sockaddr_pkt);
+		} else {
+			struct sockaddr_ll *sll = &PACKET_SKB_CB(skb)->sa.ll;
+			msg->msg_namelen = sll->sll_halen +
+				offsetof(struct sockaddr_ll, sll_addr);
+		}
 		memcpy(msg->msg_name, &PACKET_SKB_CB(skb)->sa,
 		       msg->msg_namelen);
+	}
 
 	if (pkt_sk(sk)->auxdata) {
 		struct tpacket_auxdata aux;
@@ -1498,9 +1620,9 @@ static int packet_recvmsg(struct kiocb *iocb, struct socket *sock,
 		aux.tp_snaplen = skb->len;
 		aux.tp_mac = 0;
 		aux.tp_net = skb_network_offset(skb);
-		aux.tp_vlan_tci = skb->vlan_tci;
-
+		aux.tp_vlan_tci = vlan_tx_tag_get(skb);
 		aux.tp_padding = 0;
+
 		put_cmsg(msg, SOL_PACKET, PACKET_AUXDATA, sizeof(aux), &aux);
 	}
 
@@ -1835,6 +1957,18 @@ packet_setsockopt(struct socket *sock, int level, int optname, char __user *optv
 		po->origdev = !!val;
 		return 0;
 	}
+	case PACKET_TIMESTAMP:
+	{
+		int val;
+
+		if (optlen != sizeof(val))
+			return -EINVAL;
+		if (copy_from_user(&val, optval, sizeof(val)))
+			return -EFAULT;
+
+		po->tp_tstamp = val;
+		return 0;
+	}
 	default:
 		return -ENOPROTOOPT;
 	}
@@ -1922,6 +2056,12 @@ static int packet_getsockopt(struct socket *sock, int level, int optname,
 		data = &val;
 		break;
 #endif
+	case PACKET_TIMESTAMP:
+		if (len > sizeof(int))
+			len = sizeof(int);
+		val = po->tp_tstamp;
+		data = &val;
+		break;
 	default:
 		return -ENOPROTOOPT;
 	}
@@ -2093,10 +2233,11 @@ static void packet_mm_close(struct vm_area_struct *vma)
 		atomic_dec(&pkt_sk(sk)->mapped);
 }
 
-static const struct vm_operations_struct packet_mmap_ops = {
+const struct vm_operations_struct packet_mmap_ops = {
 	.open	=	packet_mm_open,
 	.close	=	packet_mm_close,
 };
+EXPORT_SYMBOL(packet_mmap_ops);
 
 static void free_pg_vec(char **pg_vec, unsigned int order, unsigned int len)
 {
@@ -2111,7 +2252,7 @@ static void free_pg_vec(char **pg_vec, unsigned int order, unsigned int len)
 
 static inline char *alloc_one_pg_vec_page(unsigned long order)
 {
-	gfp_t gfp_flags = GFP_KERNEL | __GFP_COMP | __GFP_ZERO | __GFP_NOWARN;
+	gfp_t gfp_flags = GFP_KERNEL_UBC | __GFP_COMP | __GFP_ZERO | __GFP_NOWARN;
 
 	return (char *) __get_free_pages(gfp_flags, order);
 }
@@ -2122,7 +2263,7 @@ static char **alloc_pg_vec(struct tpacket_req *req, int order)
 	char **pg_vec;
 	int i;
 
-	pg_vec = kzalloc(block_nr * sizeof(char *), GFP_KERNEL);
+	pg_vec = kzalloc(block_nr * sizeof(char *), GFP_KERNEL_UBC);
 	if (unlikely(!pg_vec))
 		goto out;
 
@@ -2329,6 +2470,80 @@ out:
 }
 #endif
 
+void sock_packet_cpt_attr(struct sock *sk, struct cpt_sock_packet_image *v)
+{
+	struct packet_sock *po = pkt_sk(sk);
+#ifdef CONFIG_PACKET_MMAP
+	struct cpt_sock_packet_ring_image *ri;
+	struct packet_ring_buffer *rb;
+#endif
+
+	v->cpt_stats_tp_packets = po->stats.tp_packets;
+	v->cpt_stats_tp_drops = po->stats.tp_drops;
+
+	v->cpt_auxdata = po->auxdata;
+	v->cpt_origdev = po->origdev;
+	v->cpt_tp_tstamp = po->tp_tstamp;
+
+#ifdef CONFIG_PACKET_MMAP
+	v->cpt_copy_thresh = po->copy_thresh;
+	v->cpt_tp_version = po->tp_version;
+	v->cpt_tp_reserve = po->tp_reserve;
+	v->cpt_tp_loss = po->tp_loss;
+
+	for (rb = &po->rx_ring, ri = &v->cpt_rx_ring;
+	     rb <= &po->tx_ring; rb++, ri++) {
+		memset(ri, 0, sizeof(*ri));
+		if (!rb->pg_vec)
+			continue;
+		ri->cpt_tp_block_size = rb->pg_vec_pages * PAGE_SIZE;
+		ri->cpt_tp_block_nr = rb->pg_vec_len;
+		ri->cpt_tp_frame_size = rb->frame_size;
+		ri->cpt_tp_frame_nr = rb->frame_max + 1;
+	}
+#endif
+}
+EXPORT_SYMBOL(sock_packet_cpt_attr);
+
+int sock_packet_rst_attr(struct sock *sk, struct cpt_sock_packet_image *v)
+{
+	int err = 0;
+	struct packet_sock *po = pkt_sk(sk);
+#ifdef CONFIG_PACKET_MMAP
+	struct cpt_sock_packet_ring_image *ri;
+#endif
+
+	spin_lock_bh(&sk->sk_receive_queue.lock);
+	po->stats.tp_packets = v->cpt_stats_tp_packets;
+	po->stats.tp_drops = v->cpt_stats_tp_drops;
+	spin_unlock_bh(&sk->sk_receive_queue.lock);
+
+	po->auxdata = v->cpt_auxdata;
+	po->origdev = v->cpt_origdev;
+	po->tp_tstamp = v->cpt_tp_tstamp;
+
+#ifdef CONFIG_PACKET_MMAP
+	po->copy_thresh = v->cpt_copy_thresh;
+	po->tp_version = v->cpt_tp_version;
+	po->tp_reserve = v->cpt_tp_reserve;
+	po->tp_loss = v->cpt_tp_loss;
+
+	for (ri = &v->cpt_rx_ring; ri <= &v->cpt_tx_ring; ri++) {
+		struct tpacket_req req;
+
+		req.tp_block_size = ri->cpt_tp_block_size;
+		req.tp_block_nr = ri->cpt_tp_block_nr;
+		req.tp_frame_size = ri->cpt_tp_frame_size;
+		req.tp_frame_nr = ri->cpt_tp_frame_nr;
+
+		err = packet_set_ring(sk, &req, 0, ri == &v->cpt_tx_ring);
+		if (err)
+			break;
+	}
+#endif
+	return err;
+}
+EXPORT_SYMBOL(sock_packet_rst_attr);
 
 static const struct proto_ops packet_ops_spkt = {
 	.family =	PF_PACKET,

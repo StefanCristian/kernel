@@ -32,7 +32,7 @@ int seq_open(struct file *file, const struct seq_operations *op)
 	struct seq_file *p = file->private_data;
 
 	if (!p) {
-		p = kmalloc(sizeof(*p), GFP_KERNEL);
+		p = kmalloc(sizeof(*p), GFP_KERNEL_UBC);
 		if (!p)
 			return -ENOMEM;
 		file->private_data = p;
@@ -76,7 +76,7 @@ static int traverse(struct seq_file *m, loff_t offset)
 		return 0;
 	}
 	if (!m->buf) {
-		m->buf = kmalloc(m->size = PAGE_SIZE, GFP_KERNEL);
+		m->buf = kmalloc(m->size = PAGE_SIZE, GFP_KERNEL_UBC);
 		if (!m->buf)
 			return -ENOMEM;
 	}
@@ -116,7 +116,7 @@ static int traverse(struct seq_file *m, loff_t offset)
 Eoverflow:
 	m->op->stop(m, p);
 	kfree(m->buf);
-	m->buf = kmalloc(m->size <<= 1, GFP_KERNEL);
+	m->buf = kmalloc(m->size <<= 1, GFP_KERNEL_UBC);
 	return !m->buf ? -ENOMEM : -EAGAIN;
 }
 
@@ -169,7 +169,7 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 	m->version = file->f_version;
 	/* grab buffer if we didn't have one */
 	if (!m->buf) {
-		m->buf = kmalloc(m->size = PAGE_SIZE, GFP_KERNEL);
+		m->buf = kmalloc(m->size = PAGE_SIZE, GFP_KERNEL_UBC);
 		if (!m->buf)
 			goto Enomem;
 	}
@@ -210,7 +210,7 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 			goto Fill;
 		m->op->stop(m, p);
 		kfree(m->buf);
-		m->buf = kmalloc(m->size <<= 1, GFP_KERNEL);
+		m->buf = kmalloc(m->size <<= 1, GFP_KERNEL_UBC);
 		if (!m->buf)
 			goto Enomem;
 		m->count = 0;
@@ -367,15 +367,12 @@ int seq_escape(struct seq_file *m, const char *s, const char *esc)
 }
 EXPORT_SYMBOL(seq_escape);
 
-int seq_printf(struct seq_file *m, const char *f, ...)
+int seq_vprintf(struct seq_file *m, const char *f, va_list args)
 {
-	va_list args;
 	int len;
 
 	if (m->count < m->size) {
-		va_start(args, f);
 		len = vsnprintf(m->buf + m->count, m->size - m->count, f, args);
-		va_end(args);
 		if (m->count + len < m->size) {
 			m->count += len;
 			return 0;
@@ -383,6 +380,19 @@ int seq_printf(struct seq_file *m, const char *f, ...)
 	}
 	m->count = m->size;
 	return -1;
+}
+EXPORT_SYMBOL(seq_vprintf);
+
+int seq_printf(struct seq_file *m, const char *f, ...)
+{
+	int ret;
+	va_list args;
+
+	va_start(args, f);
+	ret = seq_vprintf(m, f, args);
+	va_end(args);
+
+	return ret;
 }
 EXPORT_SYMBOL(seq_printf);
 
@@ -435,6 +445,8 @@ int seq_path(struct seq_file *m, struct path *path, char *esc)
 
 	if (size) {
 		char *p = d_path(path, buf, size);
+		if (IS_ERR(p) && PTR_ERR(p) != -ENAMETOOLONG)
+			return 0;
 		if (!IS_ERR(p)) {
 			char *end = mangle_path(buf, p, esc);
 			if (end)
@@ -500,6 +512,7 @@ int seq_dentry(struct seq_file *m, struct dentry *dentry, char *esc)
 
 	return res;
 }
+EXPORT_SYMBOL_GPL(seq_dentry);
 
 int seq_bitmap(struct seq_file *m, const unsigned long *bits,
 				   unsigned int nr_bits)
@@ -551,7 +564,7 @@ static void single_stop(struct seq_file *p, void *v)
 int single_open(struct file *file, int (*show)(struct seq_file *, void *),
 		void *data)
 {
-	struct seq_operations *op = kmalloc(sizeof(*op), GFP_KERNEL);
+	struct seq_operations *op = kmalloc(sizeof(*op), GFP_KERNEL_UBC);
 	int res = -ENOMEM;
 
 	if (op) {
@@ -595,7 +608,7 @@ void *__seq_open_private(struct file *f, const struct seq_operations *ops,
 	void *private;
 	struct seq_file *seq;
 
-	private = kzalloc(psize, GFP_KERNEL);
+	private = kzalloc(psize, GFP_KERNEL_UBC);
 	if (private == NULL)
 		goto out;
 

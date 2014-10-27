@@ -21,7 +21,6 @@
 #include <linux/rwsem.h>
 #include <linux/rbtree.h>
 #include <linux/poll.h>
-#include <linux/workqueue.h>
 
 /** Max number of pages that can be used in a single read request */
 #define FUSE_MAX_PAGES_PER_REQ 32
@@ -33,7 +32,7 @@
 #define FUSE_NAME_MAX 1024
 
 /** Number of dentries for each connection in the control filesystem */
-#define FUSE_CTL_NUM_DENTRIES 5
+#define FUSE_CTL_NUM_DENTRIES 11
 
 /** If the FUSE_DEFAULT_PERMISSIONS flag is given, the filesystem
     module will check permissions based on the file mode.  Otherwise no
@@ -44,8 +43,30 @@
     doing the mount will be allowed to access the filesystem */
 #define FUSE_ALLOW_OTHER         (1 << 1)
 
+/* This means, that the userspace can reconnect back to the mountpoint */
+#define FUSE_CAN_RECONNECT	(1 << 2)
+
+/* Enable write-back cache */
+#define FUSE_WBCACHE		(1 << 3)
+
+/* Enable direct access */
+#define FUSE_ODIRECT		(1 << 4)
+
+/* Enable synchronous umount */
+#define FUSE_UMOUNT_WAIT	(1 << 5)
+
+/* Disable synchronous close */
+#define FUSE_DISABLE_CLOSE_WAIT	(1 << 6)
+
+/** Number of page pointers embedded in fuse_req */
+#define FUSE_REQ_INLINE_PAGES 1
+
 /** List of active connections */
+#ifdef CONFIG_VE
+#define fuse_conn_list (get_exec_env()->_fuse_conn_list)
+#else
 extern struct list_head fuse_conn_list;
+#endif
 
 /** Global mutex protecting fuse_conn_list and the control filesystem */
 extern struct mutex fuse_mutex;
@@ -85,6 +106,9 @@ struct fuse_inode {
 	/** Files usable in writepage.  Protected by fc->lock */
 	struct list_head write_files;
 
+	/** List of all opened files.  Protected by fc->lock */
+	struct list_head rw_files;
+
 	/** Writepages pending on truncate or fsync */
 	struct list_head queued_writes;
 
@@ -97,6 +121,9 @@ struct fuse_inode {
 
 	/** List of writepage requestst (pending or sent) */
 	struct list_head writepages;
+
+	/** Mostly to detect very first open */
+	atomic_t num_openers;
 };
 
 struct fuse_conn;
@@ -127,11 +154,25 @@ struct fuse_file {
 	/** Entry on inode's write_files list */
 	struct list_head write_entry;
 
+	/** Entry on inode's rw_files list */
+	struct list_head rw_entry;
+
 	/** RB node to be linked on fuse_conn->polled_files */
 	struct rb_node polled_node;
 
 	/** Wait queue head for poll */
 	wait_queue_head_t poll_wait;
+
+	struct list_head fl;
+	struct dentry *ff_dentry;
+
+	unsigned long ff_state;
+};
+
+/** FUSE file states (ff_state) */
+enum {
+	/** Any fops on given ff should fail immediately */
+	FUSE_S_FAIL_IMMEDIATELY,
 };
 
 /** One input argument of a request */
@@ -147,6 +188,8 @@ struct fuse_in {
 
 	/** True if the data for the last argument is in req->pages */
 	unsigned argpages:1;
+	/** True is the data for the last argument is in req->bvecs */
+	unsigned argbvec:1;
 
 	/** Number of arguments */
 	unsigned numargs;
@@ -177,6 +220,8 @@ struct fuse_out {
 
 	/** Last argument is a list of pages to copy data to */
 	unsigned argpages:1;
+	/** Last argument is a list of bvecs to copy data to */
+	unsigned argbvec:1;
 
 	/** Zero partially or not copied pages */
 	unsigned page_zeroing:1;
@@ -188,6 +233,12 @@ struct fuse_out {
 	struct fuse_arg args[3];
 };
 
+/** FUSE page descriptor */
+struct fuse_page_desc {
+	unsigned int length;
+	unsigned int offset;
+};
+
 /** The request state */
 enum fuse_req_state {
 	FUSE_REQ_INIT = 0,
@@ -196,6 +247,20 @@ enum fuse_req_state {
 	FUSE_REQ_SENT,
 	FUSE_REQ_WRITING,
 	FUSE_REQ_FINISHED
+};
+
+/** The request IO state (for asynchronous processing) */
+struct fuse_io_priv {
+	int async;
+	spinlock_t lock;
+	unsigned reqs;
+	ssize_t bytes;
+	size_t size;
+	__u64 offset;
+	bool write;
+	int err;
+	struct kiocb *iocb;
+	struct file *file;
 };
 
 /**
@@ -242,6 +307,12 @@ struct fuse_req {
 	/** Request is counted as "waiting" */
 	unsigned waiting:1;
 
+	/** Request contains pages from page-cache */
+	unsigned page_cache:1;
+
+	/** Request was killed -- pages were released */
+	unsigned killed:1;
+
 	/** State of the request */
 	enum fuse_req_state state;
 
@@ -258,10 +329,7 @@ struct fuse_req {
 	union {
 		struct fuse_forget_in forget_in;
 		struct {
-			union {
-				struct fuse_release_in in;
-				struct work_struct work;
-			};
+			struct fuse_release_in in;
 			struct path path;
 		} release;
 		struct fuse_init_in init_in;
@@ -279,20 +347,36 @@ struct fuse_req {
 		struct fuse_lk_in lk_in;
 	} misc;
 
-	/** page vector */
-	struct page *pages[FUSE_MAX_PAGES_PER_REQ];
+	/** page vector / bvecs */
+	struct page **pages;
+	struct bio_vec *bvec;
 
-	/** number of pages in vector */
-	unsigned num_pages;
+	/** page-descriptor vector */
+	struct fuse_page_desc *page_descs;
 
-	/** offset of data on first page */
-	unsigned page_offset;
+	/** size of the 'pages' array */
+	unsigned max_pages;
+
+	/** inline page vector */
+	struct page *inline_pages[FUSE_REQ_INLINE_PAGES];
+
+	/** inline page-descriptor vector */
+	struct fuse_page_desc inline_page_descs[FUSE_REQ_INLINE_PAGES];
+
+	/** number of pages/bvecs in vector */
+	union {
+		unsigned num_pages;
+		unsigned num_bvecs;
+	};
 
 	/** File used in the request (or NULL) */
 	struct fuse_file *ff;
 
 	/** Inode used in the request or NULL */
 	struct inode *inode;
+
+	/** AIO control block */
+	struct fuse_io_priv *io;
 
 	/** Link on fi->writepages */
 	struct list_head writepages_entry;
@@ -371,6 +455,10 @@ struct fuse_conn {
 
 	/** Pending interrupts */
 	struct list_head interrupts;
+
+	/** Flag indicating that INIT reply is not received yet. Allocating
+	 * any fuse request will be suspended until the flag is cleared */
+	int uninitialized;
 
 	/** Flag indicating if connection is blocked.  This will be
 	    the case before the INIT reply is received, and if there
@@ -460,6 +548,21 @@ struct fuse_conn {
 	/** Don't apply umask to creation modes */
 	unsigned dont_mask:1;
 
+	/** Use enhanced/automatic page cache invalidation. */
+	unsigned auto_inval_data:1;
+
+	/** Wait for response from daemon on close */
+	unsigned close_wait:1;
+
+	/** Does the filesystem support readdir-plus? */
+	unsigned do_readdirplus:1;
+
+	/** Does the filesystem support asynchronous direct-IO submission? */
+	unsigned async_dio:1;
+
+	/** Is fallocate not implemented by fs? */
+	unsigned no_fallocate:1;
+
 	/** The number of requests waiting for completion */
 	atomic_t num_waiting;
 
@@ -501,6 +604,8 @@ struct fuse_conn {
 
 	/** Read/write semaphore to hold when accessing sb. */
 	struct rw_semaphore killsb;
+
+	struct list_head conn_files;
 };
 
 static inline struct fuse_conn *get_fuse_conn_super(struct super_block *sb)
@@ -538,7 +643,7 @@ int fuse_inode_eq(struct inode *inode, void *_nodeidp);
  */
 struct inode *fuse_iget(struct super_block *sb, u64 nodeid,
 			int generation, struct fuse_attr *attr,
-			u64 attr_valid, u64 attr_version);
+			u64 attr_valid, u64 attr_version, int creat);
 
 int fuse_lookup_name(struct super_block *sb, u64 nodeid, struct qstr *name,
 		     struct fuse_entry_out *outarg, struct inode **inode);
@@ -548,6 +653,9 @@ int fuse_lookup_name(struct super_block *sb, u64 nodeid, struct qstr *name,
  */
 void fuse_send_forget(struct fuse_conn *fc, struct fuse_req *req,
 		      u64 nodeid, u64 nlookup);
+
+/* Used by READDIRPLUS */
+void fuse_force_forget(struct file *file, u64 nodeid);
 
 /**
  * Initialize READ or READDIR request
@@ -629,9 +737,9 @@ void fuse_ctl_cleanup(void);
 /**
  * Allocate a request
  */
-struct fuse_req *fuse_request_alloc(void);
+struct fuse_req *fuse_request_alloc(unsigned npages);
 
-struct fuse_req *fuse_request_alloc_nofs(void);
+struct fuse_req *fuse_request_alloc_nofs(unsigned npages);
 
 /**
  * Free a request
@@ -639,14 +747,54 @@ struct fuse_req *fuse_request_alloc_nofs(void);
 void fuse_request_free(struct fuse_req *req);
 
 /**
- * Get a request, may fail with -ENOMEM
+ * Get a request, may fail with -ENOMEM,
+ * caller should specify explicitly both # elements in req->pages[]
+ * and whether the request is intended for background processing
  */
-struct fuse_req *fuse_get_req(struct fuse_conn *fc);
+struct fuse_req *fuse_get_req_internal(struct fuse_conn *fc, unsigned npages,
+				       bool for_background);
+
+/**
+ * Get a request, may fail with -ENOMEM,
+ * caller should specify # elements in req->pages[] explicitly
+ */
+static inline struct fuse_req *fuse_get_req(struct fuse_conn *fc,
+					    unsigned npages)
+{
+	return fuse_get_req_internal(fc, npages, 0);
+}
+
+/**
+ * The same as fuse_get_req() but for background processing
+ */
+static inline struct fuse_req *fuse_get_req_for_background(struct fuse_conn *fc,
+							   unsigned npages)
+{
+	return fuse_get_req_internal(fc, npages, 1);
+}
+
+/**
+ * Get a request, may fail with -ENOMEM,
+ * useful for callers who doesn't use req->pages[]
+ */
+static inline struct fuse_req *fuse_get_req_nopages(struct fuse_conn *fc)
+{
+	return fuse_get_req(fc, 0);
+}
+
+/**
+ * The same as fuse_get_req_nopages() but for background processing
+ */
+static inline struct fuse_req *fuse_get_req_nopages_for_background(struct fuse_conn *fc)
+{
+	return fuse_get_req_for_background(fc, 0);
+}
 
 /**
  * Gets a requests for a file operation, always succeeds
  */
-struct fuse_req *fuse_get_req_nofail(struct fuse_conn *fc, struct file *file);
+struct fuse_req *fuse_get_req_nofail_nopages(struct fuse_conn *fc,
+					     struct file *file);
 
 /**
  * Decrement reference count of a request.  If count goes to zero free
@@ -658,6 +806,12 @@ void fuse_put_request(struct fuse_conn *fc, struct fuse_req *req);
  * Send a request (synchronous)
  */
 void fuse_request_send(struct fuse_conn *fc, struct fuse_req *req);
+
+/**
+ * Send a request (synchronous) if not FUSE_S_FAIL_IMMEDIATELY
+ */
+void fuse_request_check_and_send(struct fuse_conn *fc, struct fuse_req *req,
+				 struct fuse_file *ff);
 
 /**
  * Send a request with no reply
@@ -674,6 +828,7 @@ void fuse_request_send_background_locked(struct fuse_conn *fc,
 
 /* Abort all requests */
 void fuse_abort_conn(struct fuse_conn *fc);
+int fuse_reconnect_fd(int fd, struct fuse_conn *fc);
 
 /**
  * Invalidate inode attributes
@@ -681,6 +836,11 @@ void fuse_abort_conn(struct fuse_conn *fc);
 void fuse_invalidate_attr(struct inode *inode);
 
 void fuse_invalidate_entry_cache(struct dentry *entry);
+
+/*
+ * Increment reference count on request
+ */
+void __fuse_get_request(struct fuse_req *req);
 
 /**
  * Acquire reference to fuse_conn
@@ -715,14 +875,16 @@ void fuse_ctl_remove_conn(struct fuse_conn *fc);
 int fuse_valid_type(int m);
 
 /**
- * Is task allowed to perform filesystem operation?
+ * Is current process allowed to perform filesystem operation?
  */
-int fuse_allow_task(struct fuse_conn *fc, struct task_struct *task);
+int fuse_allow_current_process(struct fuse_conn *fc);
 
 u64 fuse_lock_owner_id(struct fuse_conn *fc, fl_owner_t id);
 
 int fuse_update_attributes(struct inode *inode, struct kstat *stat,
 			   struct file *file, bool *refreshed);
+
+int fuse_getattr_size(struct inode *inode, struct file *file, u64 *size);
 
 void fuse_flush_writepages(struct inode *inode);
 
@@ -744,13 +906,36 @@ int fuse_reverse_inval_inode(struct super_block *sb, u64 nodeid,
 int fuse_reverse_inval_entry(struct super_block *sb, u64 parent_nodeid,
 			     struct qstr *name);
 
+/**
+ * File-system tells the kernel to invalidate all fuse-files (and cache)
+ * for the given node id.
+ */
+int fuse_invalidate_files(struct fuse_conn *fc, u64 nodeid);
+
 int fuse_do_open(struct fuse_conn *fc, u64 nodeid, struct file *file,
 		 bool isdir);
-ssize_t fuse_direct_io(struct file *file, const char __user *buf,
-		       size_t count, loff_t *ppos, int write);
+
+/**
+ * fuse_direct_io() flags
+ */
+
+/** If set, it is WRITE; otherwise - READ */
+#define FUSE_DIO_WRITE (1 << 0)
+
+/** CUSE pass fuse_direct_io() a file which f_mapping->host is not from FUSE */
+#define FUSE_DIO_CUSE  (1 << 1)
+
+ssize_t fuse_direct_io(struct fuse_io_priv *io, const struct iovec *iov,
+		       unsigned long nr_segs, size_t count, loff_t *ppos,
+		       int flags);
 long fuse_do_ioctl(struct file *file, unsigned int cmd, unsigned long arg,
 		   unsigned int flags);
 unsigned fuse_file_poll(struct file *file, poll_table *wait);
 int fuse_dev_release(struct inode *inode, struct file *file);
+long fuse_file_fallocate(struct inode *inode, struct fuse_file *ff, int mode,
+			 loff_t offset, loff_t length);
+
+int fuse_do_setattr(struct inode *inode, struct iattr *attr,
+		    struct file *file);
 
 #endif /* _FS_FUSE_I_H */

@@ -116,6 +116,8 @@ config GDROM
 
 source "drivers/block/paride/Kconfig"
 
+source "drivers/block/mtip32xx/Kconfig"
+
 config BLK_CPQ_DA
 	tristate "Compaq SMART2 support"
 	depends on PCI && VIRT_TO_BUS
@@ -271,6 +273,23 @@ config BLK_DEV_CRYPTOLOOP
 	  instead, which can be configured to be on-disk compatible with the
 	  cryptoloop device.
 
+config BLK_DEV_PLOOP
+	tristate "Parallels loopback device support"
+	---help---
+	  Saying Y here will allow you to use a regular file as a block
+	  device; you can then create a file system on that block device and
+	  mount it just as you would mount other block devices such as hard
+	  drive partitions, CD-ROM drives or floppy drives. The loop devices
+	  are block special device files with major number 182 and typically
+	  called /dev/ploop0, /dev/ploop1 etc.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called loop.
+
+	  Most users will answer N here.
+
+source "drivers/block/drbd/Kconfig"
+
 config BLK_DEV_NBD
 	tristate "Network block device support"
 	depends on NET
@@ -297,6 +316,17 @@ config BLK_DEV_NBD
 	  module will be called nbd.
 
 	  If unsure, say N.
+
+config BLK_DEV_NVME
+	tristate "NVM Express block device"
+	depends on PCI
+	---help---
+	  The NVM Express driver is for solid state drives directly
+	  connected to the PCI or PCI Express bus.  If you know you
+	  don't have one of these, it is safe to answer N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called nvme.
 
 config BLK_DEV_OSD
 	tristate "OSD object-as-blkdev support"
@@ -485,5 +515,15 @@ config BLK_DEV_HD
 	  It is required for systems with ancient MFM/RLL/ESDI drives.
 
 	  If unsure, say N.
+
+config BLK_DEV_RSXX
+	tristate "IBM Flash Adapter 900GB Full Height PCIe Device Driver"
+	depends on PCI
+	help
+	  Device driver for IBM's high speed PCIe SSD
+	  storage device: Flash Adapter 900GB Full Height.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called rsxx.
 
 endif # BLK_DEV

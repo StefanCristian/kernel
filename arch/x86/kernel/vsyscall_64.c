@@ -61,6 +61,7 @@ struct vsyscall_gtod_data __vsyscall_gtod_data __section_vsyscall_gtod_data =
 {
 	.lock = SEQLOCK_UNLOCKED,
 	.sysctl_enabled = 1,
+	.gettime_monotonic_enabled = 0,
 };
 
 void update_vsyscall_tz(void)
@@ -73,8 +74,8 @@ void update_vsyscall_tz(void)
 	write_sequnlock_irqrestore(&vsyscall_gtod_data.lock, flags);
 }
 
-void update_vsyscall(struct timespec *wall_time, struct clocksource *clock,
-		     u32 mult)
+void update_vsyscall(struct timespec *wall_time, struct timespec *wtm,
+			struct clocksource *clock, u32 mult)
 {
 	unsigned long flags;
 
@@ -87,7 +88,7 @@ void update_vsyscall(struct timespec *wall_time, struct clocksource *clock,
 	vsyscall_gtod_data.clock.shift = clock->shift;
 	vsyscall_gtod_data.wall_time_sec = wall_time->tv_sec;
 	vsyscall_gtod_data.wall_time_nsec = wall_time->tv_nsec;
-	vsyscall_gtod_data.wall_to_monotonic = wall_to_monotonic;
+	vsyscall_gtod_data.wall_to_monotonic = *wtm;
 	vsyscall_gtod_data.wall_time_coarse = __current_kernel_time();
 	write_sequnlock_irqrestore(&vsyscall_gtod_data.lock, flags);
 }
@@ -232,6 +233,10 @@ static long __vsyscall(3) venosys_1(void)
 static ctl_table kernel_table2[] = {
 	{ .procname = "vsyscall64",
 	  .data = &vsyscall_gtod_data.sysctl_enabled, .maxlen = sizeof(int),
+	  .mode = 0644,
+	  .proc_handler = proc_dointvec },
+	{ .procname = "vsyscall64_gettime_monotonic",
+	  .data = &vsyscall_gtod_data.gettime_monotonic_enabled, .maxlen = sizeof(int),
 	  .mode = 0644,
 	  .proc_handler = proc_dointvec },
 	{}

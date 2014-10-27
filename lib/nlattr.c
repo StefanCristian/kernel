@@ -20,7 +20,6 @@ static u16 nla_attr_minlen[NLA_TYPE_MAX+1] __read_mostly = {
 	[NLA_U16]	= sizeof(u16),
 	[NLA_U32]	= sizeof(u32),
 	[NLA_U64]	= sizeof(u64),
-	[NLA_MSECS]	= sizeof(u64),
 	[NLA_NESTED]	= NLA_HDRLEN,
 };
 
@@ -197,7 +196,7 @@ int nla_parse(struct nlattr *tb[], int maxtype, struct nlattr *head, int len,
 	}
 
 	if (unlikely(rem > 0))
-		printk(KERN_WARNING "netlink: %d bytes leftover after parsing "
+		ve_printk(VE_LOG, KERN_WARNING "netlink: %d bytes leftover after parsing "
 		       "attributes.\n", rem);
 
 	err = 0;

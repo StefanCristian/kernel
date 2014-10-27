@@ -36,6 +36,7 @@
 #include <net/compat.h>
 #include <net/scm.h>
 
+#include <bc/kmem.h>
 
 /*
  *	Only allow a user to send credentials, that they could set with
@@ -46,7 +47,9 @@ static __inline__ int scm_check_creds(struct ucred *creds)
 {
 	const struct cred *cred = current_cred();
 
-	if ((creds->pid == task_tgid_vnr(current) || capable(CAP_SYS_ADMIN)) &&
+	if ((creds->pid == task_tgid_vnr(current) ||
+	     creds->pid == current->tgid ||
+	     capable(CAP_VE_SYS_ADMIN)) &&
 	    ((creds->uid == cred->uid   || creds->uid == cred->euid ||
 	      creds->uid == cred->suid) || capable(CAP_SETUID)) &&
 	    ((creds->gid == cred->gid   || creds->gid == cred->egid ||
@@ -73,7 +76,7 @@ static int scm_fp_copy(struct cmsghdr *cmsg, struct scm_fp_list **fplp)
 
 	if (!fpl)
 	{
-		fpl = kmalloc(sizeof(struct scm_fp_list), GFP_KERNEL);
+		fpl = kmalloc(sizeof(struct scm_fp_list), GFP_KERNEL_UBC);
 		if (!fpl)
 			return -ENOMEM;
 		*fplp = fpl;
@@ -170,6 +173,32 @@ int __scm_send(struct socket *sock, struct msghdr *msg, struct scm_cookie *p)
 			err = scm_check_creds(&p->creds);
 			if (err)
 				goto error;
+
+			if (!p->pid || pid_vnr(p->pid) != p->creds.pid) {
+				struct pid *pid;
+				err = -ESRCH;
+				pid = find_get_pid(p->creds.pid);
+				if (!pid)
+					goto error;
+				put_pid(p->pid);
+				p->pid = pid;
+			}
+
+			if (!p->cred ||
+			    (p->cred->euid != p->creds.uid) ||
+			    (p->cred->egid != p->creds.gid)) {
+				struct cred *cred;
+				err = -ENOMEM;
+				cred = prepare_creds();
+				if (!cred)
+					goto error;
+
+				cred->uid = cred->euid = p->creds.uid;
+				cred->gid = cred->egid = p->creds.gid;
+				if (p->cred)
+					put_cred(p->cred);
+				p->cred = cred;
+			}
 			break;
 		default:
 			goto error;
@@ -304,7 +333,7 @@ struct scm_fp_list *scm_fp_dup(struct scm_fp_list *fpl)
 		return NULL;
 
 	new_fpl = kmemdup(fpl, offsetof(struct scm_fp_list, fp[fpl->count]),
-			  GFP_KERNEL);
+			  GFP_KERNEL_UBC);
 	if (new_fpl) {
 		for (i = 0; i < fpl->count; i++)
 			get_file(fpl->fp[i]);

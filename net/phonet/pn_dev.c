@@ -224,8 +224,10 @@ static int phonet_device_notify(struct notifier_block *me, unsigned long what,
 				void *arg)
 {
 	struct net_device *dev = arg;
+	struct phonet_net *pnn = net_generic(dev_net(dev), phonet_net_id);
 
-	if (!net_eq(dev_net(dev), &init_net))
+	if (!pnn)
+		/* pernet memory already freed */
 		return 0;
 
 	switch (what) {
@@ -249,33 +251,19 @@ static struct notifier_block phonet_device_notifier = {
 /* Per-namespace Phonet devices handling */
 static int phonet_init_net(struct net *net)
 {
-	struct phonet_net *pnn;
+	struct phonet_net *pnn = net_generic(net, phonet_net_id);
 
-	if (!net_eq(net, &init_net))
-		return 0;
-	pnn = kmalloc(sizeof(*pnn), GFP_KERNEL);
-	if (!pnn)
+	if (!proc_net_fops_create(net, "phonet", 0, &pn_sock_seq_fops))
 		return -ENOMEM;
-
-	if (!proc_net_fops_create(net, "phonet", 0, &pn_sock_seq_fops)) {
-		kfree(pnn);
-		return -ENOMEM;
-	}
 
 	INIT_LIST_HEAD(&pnn->pndevs.list);
 	spin_lock_init(&pnn->pndevs.lock);
-	net_assign_generic(net, phonet_net_id, pnn);
 	return 0;
 }
 
 static void phonet_exit_net(struct net *net)
 {
-	struct phonet_net *pnn;
 	struct net_device *dev;
-
-	if (!net_eq(net, &init_net))
-		return;
-	pnn = net_generic(net, phonet_net_id);
 
 	rtnl_lock();
 	for_each_netdev(net, dev)
@@ -283,18 +271,19 @@ static void phonet_exit_net(struct net *net)
 	rtnl_unlock();
 
 	proc_net_remove(net, "phonet");
-	kfree(pnn);
 }
 
 static struct pernet_operations phonet_net_ops = {
 	.init = phonet_init_net,
 	.exit = phonet_exit_net,
+	.id   = &phonet_net_id,
+	.size = sizeof(struct phonet_net),
 };
 
 /* Initialize Phonet devices list */
 int __init phonet_device_init(void)
 {
-	int err = register_pernet_gen_device(&phonet_net_id, &phonet_net_ops);
+	int err = register_pernet_device(&phonet_net_ops);
 	if (err)
 		return err;
 
@@ -309,5 +298,5 @@ void phonet_device_exit(void)
 {
 	rtnl_unregister_all(PF_PHONET);
 	unregister_netdevice_notifier(&phonet_device_notifier);
-	unregister_pernet_gen_device(phonet_net_id, &phonet_net_ops);
+	unregister_pernet_device(&phonet_net_ops);
 }

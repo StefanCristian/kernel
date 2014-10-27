@@ -147,7 +147,7 @@ struct pneigh_entry
 /*
  *	neighbour table manipulation
  */
-
+#define NEIGH_NUM_HASH_RND	4
 
 struct neigh_table
 {
@@ -178,7 +178,7 @@ struct neigh_table
 	struct neigh_statistics	*stats;
 	struct neighbour	**hash_buckets;
 	unsigned int		hash_mask;
-	__u32			hash_rnd;
+	__u32			hash_rnd[NEIGH_NUM_HASH_RND];
 	struct pneigh_entry	**phash_buckets;
 };
 
@@ -205,6 +205,7 @@ extern void			neigh_destroy(struct neighbour *neigh);
 extern int			__neigh_event_send(struct neighbour *neigh, struct sk_buff *skb);
 extern int			neigh_update(struct neighbour *neigh, const u8 *lladdr, u8 new, 
 					     u32 flags);
+void __neigh_set_probe_once(struct neighbour *neigh);
 extern void			neigh_changeaddr(struct neigh_table *tbl, struct net_device *dev);
 extern int			neigh_ifdown(struct neigh_table *tbl, struct net_device *dev);
 extern int			neigh_resolve_output(struct sk_buff *skb);

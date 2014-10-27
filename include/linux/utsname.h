@@ -40,8 +40,12 @@ struct new_utsname {
 struct uts_namespace {
 	struct kref kref;
 	struct new_utsname name;
+#ifndef __GENKSYMS__
+	unsigned int proc_inum;
+#endif
 };
 extern struct uts_namespace init_uts_ns;
+extern struct new_utsname virt_utsname;
 
 #ifdef CONFIG_UTS_NS
 static inline void get_uts_ns(struct uts_namespace *ns)

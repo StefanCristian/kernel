@@ -102,6 +102,7 @@ struct dentry {
 	struct qstr d_name;
 
 	struct list_head d_lru;		/* LRU list */
+	struct list_head d_bclru;		/* LRU list */
 	/*
 	 * d_child and d_rcu can share memory
 	 */
@@ -116,9 +117,15 @@ struct dentry {
 	struct super_block *d_sb;	/* The root of the dentry tree */
 	void *d_fsdata;			/* fs-specific data */
 
+	unsigned int d_lru_time;
+
+	struct user_beancounter *d_ub;
 	unsigned char d_iname[DNAME_INLINE_LEN_MIN];	/* small names */
 };
 
+#define DNAME_INLINE_LEN (sizeof(struct dentry)-offsetof(struct dentry,d_iname))
+
+extern struct kmem_cache *dentry_cache;
 /*
  * dentry->d_lock spinlock nesting subclasses:
  *
@@ -139,6 +146,11 @@ struct dentry_operations {
 	void (*d_release)(struct dentry *);
 	void (*d_iput)(struct dentry *, struct inode *);
 	char *(*d_dname)(struct dentry *, char *, int);
+#ifndef __GENKSYMS__
+	struct vfsmount *(*d_automount)(struct path *);
+	int (*d_manage)(struct dentry *, bool);
+	int (*d_weak_revalidate)(struct dentry *, struct nameidata *);
+#endif
 };
 
 /* the dentry parameter passed to d_hash and d_compare is the parent
@@ -157,6 +169,7 @@ d_compare:	no		yes		yes      no
 d_delete:	no		yes		no       no
 d_release:	no		no		no       yes
 d_iput:		no		no		no       yes
+d_automount:	no		no		no	 yes
  */
 
 /* d_flags entries */
@@ -180,11 +193,21 @@ d_iput:		no		no		no       yes
 #define DCACHE_REFERENCED	0x0008  /* Recently used, don't discard. */
 #define DCACHE_UNHASHED		0x0010	
 
-#define DCACHE_INOTIFY_PARENT_WATCHED	0x0020 /* Parent inode is watched by inotify */
+#define DCACHE_INOTIFY_PARENT_WATCHED 0x0020
+     /* Parent inode is watched by inotify */
 
 #define DCACHE_COOKIE		0x0040	/* For use by dcookie subsystem */
 
-#define DCACHE_FSNOTIFY_PARENT_WATCHED	0x0080 /* Parent inode is watched by some fsnotify listener */
+#define DCACHE_FSNOTIFY_PARENT_WATCHED 0x0080
+     /* Parent inode is watched by some fsnotify listener */
+
+#define DCACHE_BCTOP		0x0100
+
+#define DCACHE_MOUNTED		0x10000	/* is a mountpoint */
+#define DCACHE_NEED_AUTOMOUNT	0x20000	/* handle automount on this dir */
+#define DCACHE_MANAGE_TRANSIT	0x40000	/* manage transit from this dirent */
+#define DCACHE_MANAGED_DENTRY \
+	(DCACHE_MOUNTED|DCACHE_NEED_AUTOMOUNT|DCACHE_MANAGE_TRANSIT)
 
 extern spinlock_t dcache_lock;
 extern seqlock_t rename_lock;
@@ -237,12 +260,14 @@ extern void d_delete(struct dentry *);
 
 /* allocate/de-allocate */
 extern struct dentry * d_alloc(struct dentry *, const struct qstr *);
+extern struct dentry * d_alloc_pseudo(struct super_block *, const struct qstr *);
 extern struct dentry * d_splice_alias(struct inode *, struct dentry *);
 extern struct dentry * d_add_ci(struct dentry *, struct inode *, struct qstr *);
 extern struct dentry * d_obtain_alias(struct inode *);
 extern void shrink_dcache_sb(struct super_block *);
 extern void shrink_dcache_parent(struct dentry *);
 extern void shrink_dcache_for_umount(struct super_block *);
+extern int __shrink_dcache_ub(struct user_beancounter *ub, int count, int popup);
 extern int d_invalidate(struct dentry *);
 
 /* only used at mount-time */
@@ -314,6 +339,7 @@ extern char *dynamic_dname(struct dentry *, char *, int, const char *, ...);
 extern char *__d_path(const struct path *path, struct path *root, char *, int);
 extern char *d_path(const struct path *, char *, int);
 extern char *dentry_path(struct dentry *, char *, int);
+extern int d_root_check(struct path *path);
 
 /* Allocation counts.. */
 
@@ -369,6 +395,12 @@ static inline struct dentry *dget_parent(struct dentry *dentry)
 }
 
 extern void dput(struct dentry *);
+extern void dput_nocache(struct dentry *dentry, int nocache);
+
+static inline bool d_managed(struct dentry *dentry)
+{
+	return dentry->d_flags & DCACHE_MANAGED_DENTRY;
+}
 
 static inline int d_mountpoint(struct dentry *dentry)
 {

@@ -55,6 +55,7 @@
 #include <linux/async.h>
 #include <linux/percpu.h>
 #include <linux/kmemleak.h>
+#include "module-verify.h"
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/module.h>
@@ -181,8 +182,11 @@ extern const struct kernel_symbol __stop___ksymtab_gpl_future[];
 extern const struct kernel_symbol __start___ksymtab_gpl_future[];
 extern const struct kernel_symbol __stop___ksymtab_gpl_future[];
 extern const unsigned long __start___kcrctab[];
+extern const unsigned long __stop___kcrctab[];
 extern const unsigned long __start___kcrctab_gpl[];
+extern const unsigned long __stop___kcrctab_gpl[];
 extern const unsigned long __start___kcrctab_gpl_future[];
+extern const unsigned long __stop___kcrctab_gpl_future[];
 #ifdef CONFIG_UNUSED_SYMBOLS
 extern const struct kernel_symbol __start___ksymtab_unused[];
 extern const struct kernel_symbol __stop___ksymtab_unused[];
@@ -806,16 +810,8 @@ SYSCALL_DEFINE2(delete_module, const char __user *, name_user,
 		return -EFAULT;
 	name[MODULE_NAME_LEN-1] = '\0';
 
-	/* Create stop_machine threads since free_module relies on
-	 * a non-failing stop_machine call. */
-	ret = stop_machine_create();
-	if (ret)
-		return ret;
-
-	if (mutex_lock_interruptible(&module_mutex) != 0) {
-		ret = -EINTR;
-		goto out_stop;
-	}
+	if (mutex_lock_interruptible(&module_mutex) != 0)
+		return -EINTR;
 
 	mod = find_module(name);
 	if (!mod) {
@@ -874,8 +870,6 @@ SYSCALL_DEFINE2(delete_module, const char __user *, name_user,
 
  out:
 	mutex_unlock(&module_mutex);
-out_stop:
-	stop_machine_destroy();
 	return ret;
 }
 
@@ -1184,7 +1178,7 @@ static ssize_t module_sect_show(struct module_attribute *mattr,
 {
 	struct module_sect_attr *sattr =
 		container_of(mattr, struct module_sect_attr, mattr);
-	return sprintf(buf, "0x%lx\n", sattr->address);
+	return sprintf(buf, "0x%pK\n", (void *)sattr->address);
 }
 
 static void free_sect_attrs(struct module_sect_attrs *sect_attrs)
@@ -1271,7 +1265,7 @@ struct module_notes_attrs {
 	struct bin_attribute attrs[0];
 };
 
-static ssize_t module_notes_read(struct kobject *kobj,
+static ssize_t module_notes_read(struct file *filp, struct kobject *kobj,
 				 struct bin_attribute *bin_attr,
 				 char *buf, loff_t pos, size_t count)
 {
@@ -1941,9 +1935,10 @@ static unsigned long layout_symtab(struct module *mod,
 	src = (void *)hdr + symsect->sh_offset;
 	nsrc = symsect->sh_size / sizeof(*src);
 	strtab = (void *)hdr + strsect->sh_offset;
-	for (ndst = i = 1; i < nsrc; ++i, ++src)
-		if (is_core_symbol(src, sechdrs, hdr->e_shnum)) {
-			unsigned int j = src->st_name;
+	for (ndst = i = 0; i < nsrc; i++)
+		if (i == 0 ||
+		    is_core_symbol(src + i, sechdrs, hdr->e_shnum)) {
+			unsigned int j = src[i].st_name;
 
 			while(!__test_and_set_bit(j, strmap) && strtab[j])
 				++j;
@@ -1995,12 +1990,14 @@ static void add_kallsyms(struct module *mod,
 	mod->core_symtab = dst = mod->module_core + symoffs;
 	src = mod->symtab;
 	*dst = *src;
-	for (ndst = i = 1; i < mod->num_symtab; ++i, ++src) {
-		if (!is_core_symbol(src, sechdrs, shnum))
-			continue;
-		dst[ndst] = *src;
-		dst[ndst].st_name = bitmap_weight(strmap, dst[ndst].st_name);
-		++ndst;
+	for (ndst = i = 0; i < mod->num_symtab; i++) {
+		if (i == 0 ||
+		    is_core_symbol(src + i, sechdrs, shnum)) {
+			dst[ndst] = src[i];
+			dst[ndst].st_name =
+				bitmap_weight(strmap, dst[ndst].st_name);
+			++ndst;
+		}
 	}
 	mod->core_num_syms = ndst;
 
@@ -2044,6 +2041,12 @@ static void dynamic_debug_setup(struct _ddebug *debug, unsigned int num)
 #endif
 }
 
+static void dynamic_debug_remove(struct _ddebug *debug)
+{
+	if (debug)
+		ddebug_remove_module(debug->modname);
+}
+
 static void *module_alloc_update_bounds(unsigned long size)
 {
 	void *ret = module_alloc(size);
@@ -2065,9 +2068,7 @@ static void kmemleak_load_module(struct module *mod, Elf_Ehdr *hdr,
 	unsigned int i;
 
 	/* only scan the sections containing data */
-	kmemleak_scan_area(mod->module_core, (unsigned long)mod -
-			   (unsigned long)mod->module_core,
-			   sizeof(struct module), GFP_KERNEL);
+	kmemleak_scan_area(mod, sizeof(struct module), GFP_KERNEL);
 
 	for (i = 1; i < hdr->e_shnum; i++) {
 		if (!(sechdrs[i].sh_flags & SHF_ALLOC))
@@ -2076,8 +2077,7 @@ static void kmemleak_load_module(struct module *mod, Elf_Ehdr *hdr,
 		    && strncmp(secstrings + sechdrs[i].sh_name, ".bss", 4) != 0)
 			continue;
 
-		kmemleak_scan_area(mod->module_core, sechdrs[i].sh_addr -
-				   (unsigned long)mod->module_core,
+		kmemleak_scan_area((void *)sechdrs[i].sh_addr,
 				   sechdrs[i].sh_size, GFP_KERNEL);
 	}
 }
@@ -2105,7 +2105,10 @@ static noinline struct module *load_module(void __user *umod,
 	struct module *mod;
 	long err = 0;
 	void *percpu = NULL, *ptr = NULL; /* Stops spurious gcc warning */
+	struct _ddebug *debug = NULL;
+	unsigned int num_debug = 0;
 	unsigned long symoffs, stroffs, *strmap;
+	int gpgsig_ok;
 
 	mm_segment_t old_fs;
 
@@ -2134,8 +2137,11 @@ static noinline struct module *load_module(void __user *umod,
 		goto free_hdr;
 	}
 
-	if (len < hdr->e_shoff + hdr->e_shnum * sizeof(Elf_Shdr))
-		goto truncated;
+	/* Verify the module's contents */
+	gpgsig_ok = 0;
+	err = module_verify(hdr, len, &gpgsig_ok);
+	if (err < 0)
+		goto free_hdr;
 
 	/* Convenience variables */
 	sechdrs = (void *)hdr + hdr->e_shoff;
@@ -2173,6 +2179,7 @@ static noinline struct module *load_module(void __user *umod,
 	}
 	/* This is temporary: point mod into copy of data. */
 	mod = (void *)sechdrs[modindex].sh_addr;
+	mod->gpgsig_ok = gpgsig_ok;
 
 	if (symindex == 0) {
 		printk(KERN_WARNING "%s: module has no symbols (stripped?)\n",
@@ -2405,6 +2412,12 @@ static noinline struct module *load_module(void __user *umod,
 					 "_ftrace_events",
 					 sizeof(*mod->trace_events),
 					 &mod->num_trace_events);
+	/*
+	 * This section contains pointers to allocated objects in the trace
+	 * code and not scanning it leads to false positives.
+	 */
+	kmemleak_scan_area(mod->trace_events, sizeof(*mod->trace_events) *
+			   mod->num_trace_events, GFP_KERNEL);
 #endif
 #ifdef CONFIG_FTRACE_MCOUNT_RECORD
 	/* sechdrs[0].sh_size is always zero */
@@ -2471,9 +2484,6 @@ static noinline struct module *load_module(void __user *umod,
 	strmap = NULL;
 
 	if (!mod->taints) {
-		struct _ddebug *debug;
-		unsigned int num_debug;
-
 		debug = section_objs(hdr, sechdrs, secstrings, "__verbose",
 				     sizeof(*debug), &num_debug);
 		if (debug)
@@ -2482,7 +2492,7 @@ static noinline struct module *load_module(void __user *umod,
 
 	err = module_finalize(hdr, sechdrs, mod);
 	if (err < 0)
-		goto cleanup;
+		goto ddebug;
 
 	/* flush the icache in correct context */
 	old_fs = get_fs();
@@ -2539,6 +2549,8 @@ static noinline struct module *load_module(void __user *umod,
 	list_del_rcu(&mod->list);
 	synchronize_sched();
 	module_arch_cleanup(mod);
+ ddebug:
+	dynamic_debug_remove(debug);
  cleanup:
 	free_modinfo(mod);
 	kobject_del(&mod->mkobj.kobj);
@@ -2893,6 +2905,8 @@ static char *module_flags(struct module *mod, char *buf)
 			buf[bx++] = 'F';
 		if (mod->taints & (1 << TAINT_CRAP))
 			buf[bx++] = 'C';
+		if (mod->taints & (1 << TAINT_TECH_PREVIEW))
+			buf[bx++] = 'T';
 		/*
 		 * TAINT_FORCED_RMMOD: could be added.
 		 * TAINT_UNSAFE_SMP, TAINT_MACHINE_CHECK, TAINT_BAD_PAGE don't
@@ -2917,6 +2931,8 @@ static char *module_flags(struct module *mod, char *buf)
 static void *m_start(struct seq_file *m, loff_t *pos)
 {
 	mutex_lock(&module_mutex);
+	if (!ve_is_super(get_exec_env()))
+		return NULL;
 	return seq_list_start(&modules, *pos);
 }
 
@@ -2945,7 +2961,7 @@ static int m_show(struct seq_file *m, void *p)
 		   mod->state == MODULE_STATE_COMING ? "Loading":
 		   "Live");
 	/* Used by oprofile and other similar tools. */
-	seq_printf(m, " 0x%p", mod->module_core);
+	seq_printf(m, " 0x%pK", mod->module_core);
 
 	/* Taints info */
 	if (mod->taints)
@@ -2981,7 +2997,7 @@ static const struct file_operations proc_modules_operations = {
 
 static int __init proc_modules_init(void)
 {
-	proc_create("modules", 0, NULL, &proc_modules_operations);
+	proc_create("modules", 0, &glob_proc_root, &proc_modules_operations);
 	return 0;
 }
 module_init(proc_modules_init);
@@ -3099,8 +3115,13 @@ void print_modules(void)
 	printk(KERN_DEFAULT "Modules linked in:");
 	/* Most callers should already have preempt disabled, but make sure */
 	preempt_disable();
-	list_for_each_entry_rcu(mod, &modules, list)
+	list_for_each_entry_rcu(mod, &modules, list) {
 		printk(" %s%s", mod->name, module_flags(mod, buf));
+#ifdef CONFIG_MODULE_SIG
+		if (!mod->gpgsig_ok)
+			printk("(U)");
+#endif
+	}
 	preempt_enable();
 	if (last_unloaded_module[0])
 		printk(" [last unloaded: %s]", last_unloaded_module);
@@ -3166,3 +3187,4 @@ int module_get_iter_tracepoints(struct tracepoint_iter *iter)
 	return found;
 }
 #endif
+

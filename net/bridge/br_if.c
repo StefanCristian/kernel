@@ -12,13 +12,17 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/nsproxy.h>
 #include <linux/netdevice.h>
+#include <linux/netpoll.h>
 #include <linux/ethtool.h>
 #include <linux/if_arp.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/rtnetlink.h>
 #include <linux/if_ether.h>
+#include <linux/if_vlan.h>
+#include <linux/etherdevice.h>
 #include <net/sock.h>
 
 #include "br_private.h"
@@ -85,6 +89,60 @@ void br_port_carrier_check(struct net_bridge_port *p)
 	}
 }
 
+void br_add_vlans_to_port(struct net_bridge *br, struct net_bridge_port *p)
+{
+	int vid;
+	struct net_device *vlan_dev;
+	const struct net_device_ops *ops = p->dev->netdev_ops;
+
+	if (!br->vlgrp)
+		return;
+
+	if ((p->dev->features & NETIF_F_HW_VLAN_RX) &&
+	    ops->ndo_vlan_rx_register)
+		ops->ndo_vlan_rx_register(p->dev, br->vlgrp);
+
+	if (!(p->dev->features & NETIF_F_HW_VLAN_FILTER) ||
+	    !ops->ndo_vlan_rx_add_vid)
+		return;
+
+	/* Don't mess with vid 0.  Could keep a separate vlan list
+	 * to make this less expensive, but that adds complexity.
+	 */
+	for (vid = 1; vid < 4096; vid++) {
+		vlan_dev = vlan_group_get_device(br->vlgrp, vid);
+		if (vlan_dev)
+			ops->ndo_vlan_rx_add_vid(p->dev, vid);
+	}
+}
+
+void br_del_vlans_from_port(struct net_bridge *br, struct net_bridge_port *p)
+{
+	int vid;
+	struct net_device *vlan_dev;
+	const struct net_device_ops *ops = p->dev->netdev_ops;
+
+	if (!br->vlgrp)
+		return;
+
+	if (!(p->dev->features & NETIF_F_HW_VLAN_FILTER) ||
+	    !ops->ndo_vlan_rx_kill_vid)
+		goto unreg;
+
+	for (vid = 1; vid < 4096; vid++) {
+		vlan_dev = vlan_group_get_device(br->vlgrp, vid);
+		if (vlan_dev) {
+			ops->ndo_vlan_rx_kill_vid(p->dev, vid);
+			vlan_group_set_device(br->vlgrp, vid, vlan_dev);
+		}
+	}
+
+unreg:
+	if ((p->dev->features & NETIF_F_HW_VLAN_RX) &&
+	    ops->ndo_vlan_rx_register)
+		ops->ndo_vlan_rx_register(p->dev, NULL);
+}
+
 static void release_nbp(struct kobject *kobj)
 {
 	struct net_bridge_port *p
@@ -135,6 +193,8 @@ static void del_nbp(struct net_bridge_port *p)
 
 	dev_set_promiscuity(dev, -1);
 
+	br_del_vlans_from_port(br, p);
+
 	spin_lock_bh(&br->lock);
 	br_stp_disable_port(p);
 	spin_unlock_bh(&br->lock);
@@ -145,7 +205,15 @@ static void del_nbp(struct net_bridge_port *p)
 
 	list_del_rcu(&p->list);
 
+	dev->priv_flags &= ~IFF_BRIDGE_PORT;
+
+	smp_wmb(); /* In pair to handle_bridge() and bridge_hard_start_xmit() */
+
+	synchronize_net();
+
 	rcu_assign_pointer(dev->br_port, NULL);
+
+	br_multicast_del_port(p);
 
 	kobject_uevent(&p->kobj, KOBJ_REMOVE);
 	kobject_del(&p->kobj);
@@ -154,9 +222,14 @@ static void del_nbp(struct net_bridge_port *p)
 }
 
 /* called with RTNL */
-static void del_br(struct net_bridge *br)
+static void del_br(struct net_bridge *br, struct list_head *head)
 {
 	struct net_bridge_port *p, *n;
+
+	if (br->master_dev) {
+		dev_put(br->master_dev);
+		rcu_assign_pointer(br->master_dev, NULL);
+	}
 
 	list_for_each_entry_safe(p, n, &br->port_list, list) {
 		del_nbp(p);
@@ -165,10 +238,10 @@ static void del_br(struct net_bridge *br)
 	del_timer_sync(&br->gc_timer);
 
 	br_sysfs_delbr(br->dev);
-	unregister_netdevice(br->dev);
+	unregister_netdevice_queue(br->dev, head);
 }
 
-static struct net_device *new_bridge_dev(struct net *net, const char *name)
+struct net_device *new_bridge_dev(struct net *net, const char *name)
 {
 	struct net_bridge *br;
 	struct net_device *dev;
@@ -190,7 +263,7 @@ static struct net_device *new_bridge_dev(struct net *net, const char *name)
 	br->bridge_id.prio[0] = 0x80;
 	br->bridge_id.prio[1] = 0x00;
 
-	memcpy(br->group_addr, br_group_address, ETH_ALEN);
+	memcpy(br->group_addr, br_reserved_address, ETH_ALEN);
 
 	br->feature_mask = dev->features;
 	br->stp_enabled = BR_NO_STP;
@@ -209,6 +282,7 @@ static struct net_device *new_bridge_dev(struct net *net, const char *name)
 	INIT_LIST_HEAD(&br->age_list);
 
 	br_stp_timer_init(br);
+	br_multicast_init(br);
 
 	return dev;
 }
@@ -260,11 +334,12 @@ static struct net_bridge_port *new_nbp(struct net_bridge *br,
 	br_init_port(p);
 	p->state = BR_STATE_DISABLED;
 	br_stp_port_timer_init(p);
+	br_multicast_add_port(p);
 
 	return p;
 }
 
-static struct device_type br_type = {
+struct device_type br_type = {
 	.name	= "bridge",
 };
 
@@ -323,7 +398,7 @@ int br_del_bridge(struct net *net, const char *name)
 	}
 
 	else
-		del_br(netdev_priv(dev));
+		del_br(netdev_priv(dev), NULL);
 
 	rtnl_unlock();
 	return ret;
@@ -369,6 +444,7 @@ void br_features_recompute(struct net_bridge *br)
 
 done:
 	br->dev->features = netdev_fix_features(features, NULL);
+	netdev_features_change(br->dev);
 }
 
 /* called with RTNL */
@@ -389,6 +465,10 @@ int br_add_if(struct net_bridge *br, struct net_device *dev)
 	/* Device is already being bridged */
 	if (dev->br_port != NULL)
 		return -EBUSY;
+
+	/* No bridging devices that dislike that (e.g. wireless) */
+	if (netdev_extended(dev)->ext_priv_flags & IFF_DONT_BRIDGE)
+		return -EOPNOTSUPP;
 
 	p = new_nbp(br, dev);
 	if (IS_ERR(p))
@@ -412,17 +492,29 @@ int br_add_if(struct net_bridge *br, struct net_device *dev)
 		goto err2;
 
 	rcu_assign_pointer(dev->br_port, p);
+
 	dev_disable_lro(dev);
+
+	dev->priv_flags |= IFF_BRIDGE_PORT;
+
+	smp_wmb(); /* In pair to handle_bridge() and bridge_hard_start_xmit() */
 
 	list_add_rcu(&p->list, &br->port_list);
 
+	br_add_vlans_to_port(br, p);
+
+	br_features_recompute(br);
+
 	spin_lock_bh(&br->lock);
 	br_stp_recalculate_bridge_id(br);
-	br_features_recompute(br);
 
 	if ((dev->flags & IFF_UP) && netif_carrier_ok(dev) &&
 	    (br->dev->flags & IFF_UP))
 		br_stp_enable_port(p);
+	if (!(dev->features & NETIF_F_VIRTUAL) && !br->master_dev) {
+		dev_hold(dev);
+		rcu_assign_pointer(br->master_dev, dev);
+	}
 	spin_unlock_bh(&br->lock);
 
 	br_ifinfo_notify(RTM_NEWLINK, p);
@@ -457,8 +549,19 @@ int br_del_if(struct net_bridge *br, struct net_device *dev)
 
 	spin_lock_bh(&br->lock);
 	br_stp_recalculate_bridge_id(br);
-	br_features_recompute(br);
+	if (br->master_dev == dev) {
+		rcu_assign_pointer(br->master_dev, NULL);
+		dev_put(dev);
+		list_for_each_entry(p, &br->port_list, list)
+			if (!(p->dev->features & NETIF_F_VIRTUAL)) {
+				dev_hold(p->dev);
+				rcu_assign_pointer(br->master_dev, p->dev);
+				break;
+			}
+	}
 	spin_unlock_bh(&br->lock);
+
+	br_features_recompute(br);
 
 	return 0;
 }
@@ -466,15 +569,14 @@ int br_del_if(struct net_bridge *br, struct net_device *dev)
 void br_net_exit(struct net *net)
 {
 	struct net_device *dev;
+	LIST_HEAD(list);
 
 	rtnl_lock();
-restart:
-	for_each_netdev(net, dev) {
-		if (dev->priv_flags & IFF_EBRIDGE) {
-			del_br(netdev_priv(dev));
-			goto restart;
-		}
-	}
+	for_each_netdev(net, dev)
+		if (dev->priv_flags & IFF_EBRIDGE)
+			del_br(netdev_priv(dev), &list);
+
+	unregister_netdevice_many(&list);
 	rtnl_unlock();
 
 }

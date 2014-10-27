@@ -213,8 +213,16 @@ struct class_dev_iter {
 	const struct device_type	*type;
 };
 
+#ifndef CONFIG_VE
 extern struct kobject *sysfs_dev_block_kobj;
 extern struct kobject *sysfs_dev_char_kobj;
+#define ve_sysfs_dev_block_kobj sysfs_dev_block_kobj
+#define ve_sysfs_dev_char_kobj sysfs_dev_char_kobj
+#else
+#define ve_sysfs_dev_block_kobj (get_exec_env()->dev_block_kobj)
+#define ve_sysfs_dev_char_kobj (get_exec_env()->dev_char_kobj)
+#endif
+
 extern int __must_check __class_register(struct class *class,
 					 struct lock_class_key *key);
 extern void class_unregister(struct class *class);
@@ -278,6 +286,15 @@ extern struct class * __must_check __class_create(struct module *owner,
 						  const char *name,
 						  struct lock_class_key *key);
 extern void class_destroy(struct class *cls);
+
+extern struct class net_class;
+extern struct kset *class_kset;
+
+int classes_init(void);
+void classes_fini(void);
+
+int devices_init(void);
+void devices_fini(void);
 
 /* This is a #define to keep the compiler from merging different
  * instances of the __key variable */
@@ -472,6 +489,21 @@ static inline int device_is_registered(struct device *dev)
 	return dev->kobj.state_in_sysfs;
 }
 
+static inline void device_lock(struct device *dev)
+{
+	down(&dev->sem);
+}
+
+static inline int device_trylock(struct device *dev)
+{
+	return down_trylock(&dev->sem);
+}
+
+static inline void device_unlock(struct device *dev)
+{
+	up(&dev->sem);
+}
+
 void driver_init(void);
 
 /*
@@ -486,7 +518,7 @@ extern int device_for_each_child(struct device *dev, void *data,
 		     int (*fn)(struct device *dev, void *data));
 extern struct device *device_find_child(struct device *dev, void *data,
 				int (*match)(struct device *dev, void *data));
-extern int device_rename(struct device *dev, char *new_name);
+extern int device_rename(struct device *dev, const char *new_name);
 extern int device_move(struct device *dev, struct device *new_parent,
 		       enum dpm_order dpm_order);
 extern const char *device_get_devnode(struct device *dev,
@@ -556,6 +588,7 @@ extern void put_device(struct device *dev);
 extern void wait_for_device_probe(void);
 
 #ifdef CONFIG_DEVTMPFS
+extern struct file_system_type dev_fs_type;
 extern int devtmpfs_create_node(struct device *dev);
 extern int devtmpfs_delete_node(struct device *dev);
 extern int devtmpfs_mount(const char *mountpoint);
@@ -571,6 +604,8 @@ extern void device_shutdown(void);
 /* drivers/base/sys.c */
 extern void sysdev_shutdown(void);
 
+/* net/core/net-sysfs.c */
+int is_dev_netdev(struct device *dev);
 /* debugging and troubleshooting/diagnostic helpers. */
 extern const char *dev_driver_string(const struct device *dev);
 #define dev_printk(level, dev, format, arg...)	\
@@ -625,4 +660,26 @@ extern const char *dev_driver_string(const struct device *dev);
 	MODULE_ALIAS("char-major-" __stringify(major) "-" __stringify(minor))
 #define MODULE_ALIAS_CHARDEV_MAJOR(major) \
 	MODULE_ALIAS("char-major-" __stringify(major) "-*")
+
+/**
+ * module_driver() - Helper macro for drivers that don't do anything
+ * special in module init/exit. This eliminates a lot of boilerplate.
+ * Each module may only use this macro once, and calling it replaces
+ * module_init() and module_exit().
+ *
+ * Use this macro to construct bus specific macros for registering
+ * drivers, and do not use it on its own.
+ */
+#define module_driver(__driver, __register, __unregister) \
+static int __init __driver##_init(void) \
+{ \
+	return __register(&(__driver)); \
+} \
+module_init(__driver##_init); \
+static void __exit __driver##_exit(void) \
+{ \
+	__unregister(&(__driver)); \
+} \
+module_exit(__driver##_exit);
+
 #endif /* _DEVICE_H_ */

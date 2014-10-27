@@ -1,15 +1,22 @@
+#ifndef _LINUX_SWAPOPS_H
+#define _LINUX_SWAPOPS_H
+
+#include <linux/radix-tree.h>
+
 /*
  * swapcache pages are stored in the swapper_space radix tree.  We want to
  * get good packing density in that tree, so the index should be dense in
  * the low-order bits.
  *
- * We arrange the `type' and `offset' fields so that `type' is at the five
+ * We arrange the `type' and `offset' fields so that `type' is at the seven
  * high-order bits of the swp_entry_t and `offset' is right-aligned in the
- * remaining bits.
+ * remaining bits.  Although `type' itself needs only five bits, we allow for
+ * shmem/tmpfs to shift it all up a further two bits: see swp_to_radix_entry().
  *
  * swp_entry_t's are *never* stored anywhere in their arch-dependent format.
  */
-#define SWP_TYPE_SHIFT(e)	(sizeof(e.val) * 8 - MAX_SWAPFILES_SHIFT)
+#define SWP_TYPE_SHIFT(e)	((sizeof(e.val) * 8) - \
+			(MAX_SWAPFILES_SHIFT + RADIX_TREE_EXCEPTIONAL_SHIFT))
 #define SWP_OFFSET_MASK(e)	((1UL << SWP_TYPE_SHIFT(e)) - 1)
 
 /*
@@ -75,6 +82,114 @@ static inline pte_t swp_entry_to_pte(swp_entry_t entry)
 	BUG_ON(pte_file(__swp_entry_to_pte(arch_entry)));
 	return __swp_entry_to_pte(arch_entry);
 }
+
+static inline swp_entry_t radix_to_swp_entry(void *arg)
+{
+	swp_entry_t entry;
+
+	entry.val = (unsigned long)arg >> RADIX_TREE_EXCEPTIONAL_SHIFT;
+	return entry;
+}
+
+static inline void *swp_to_radix_entry(swp_entry_t entry)
+{
+	unsigned long value;
+
+	value = entry.val << RADIX_TREE_EXCEPTIONAL_SHIFT;
+	return (void *)(value | RADIX_TREE_EXCEPTIONAL_ENTRY);
+}
+
+#include <linux/rmap.h>
+
+#ifdef CONFIG_MEMORY_VSWAP
+
+static inline swp_entry_t make_vswap_entry(struct page *page, int write)
+{
+	VM_BUG_ON(!PageLocked(page));
+	return swp_entry(write ? SWP_VSWAP_WRITE : SWP_VSWAP_READ,
+			page_to_pfn(page));
+}
+
+static inline int is_vswap_entry(swp_entry_t entry)
+{
+	return swp_type(entry) == SWP_VSWAP_READ ||
+	       swp_type(entry) == SWP_VSWAP_WRITE;
+}
+
+static inline int is_write_vswap_entry(swp_entry_t entry)
+{
+	return swp_type(entry) == SWP_VSWAP_WRITE;
+}
+
+static inline swp_entry_t wprotect_vswap_entry(swp_entry_t entry)
+{
+	return swp_entry(SWP_VSWAP_READ, swp_offset(entry));
+}
+
+static inline struct page *vswap_entry_to_page(swp_entry_t entry)
+{
+	return pfn_to_page(swp_offset(entry));
+}
+
+extern int add_to_vswap(struct page *page);
+extern void __remove_from_vswap(struct page *page);
+extern int remove_from_vswap(struct page *page);
+
+static inline void get_vswap_page(struct page *page)
+{
+	VM_BUG_ON(!PageVSwap(page));
+	VM_BUG_ON(!atomic_read(&page->vswap_count));
+	atomic_inc(&page->vswap_count);
+}
+
+static inline void put_vswap_page(struct page *page)
+{
+	VM_BUG_ON(!PageVSwap(page));
+	if (atomic_dec_and_test(&page->vswap_count))
+		__remove_from_vswap(page);
+}
+
+static inline int page_vswapcount(struct page *page)
+{
+	return atomic_read(&page->vswap_count);
+}
+
+#else /* CONFIG_MEMORY_VSWAP */
+
+static inline swp_entry_t make_vswap_entry(struct page *page, int write)
+{
+	return swp_entry(0, 0);
+}
+static inline int is_vswap_entry(swp_entry_t entry) {
+	return 0;
+}
+static inline int is_write_vswap_entry(swp_entry_t entry)
+{
+	return 0;
+}
+static inline swp_entry_t wprotect_vswap_entry(swp_entry_t entry)
+{
+	return swp_entry(0, 0);
+}
+static inline struct page *vswap_entry_to_page(swp_entry_t entry)
+{
+	BUG();
+	return NULL;
+}
+static inline int add_to_vswap(struct page *page)
+{
+	return SWAP_FAIL;
+}
+static inline int remove_from_vswap(struct page *page)
+{
+	BUG();
+	return 0;
+}
+static inline void get_vswap_page(struct page *page) { }
+static inline void put_vswap_page(struct page *page) { }
+static inline int page_vswapcount(struct page *page) { return 0; }
+
+#endif /* CONFIG_MEMORY_VSWAP */
 
 #ifdef CONFIG_MIGRATION
 static inline swp_entry_t make_migration_entry(struct page *page, int write)
@@ -169,3 +284,5 @@ static inline int non_swap_entry(swp_entry_t entry)
 	return 0;
 }
 #endif
+
+#endif /* _LINUX_SWAPOPS_H */

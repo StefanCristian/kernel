@@ -20,6 +20,7 @@
 #include <net/netns/conntrack.h>
 #endif
 #include <net/netns/xfrm.h>
+#include <net/dst_ops.h>
 
 struct proc_dir_entry;
 struct net_device;
@@ -27,6 +28,10 @@ struct sock;
 struct ctl_table_header;
 struct net_generic;
 struct sock;
+
+
+#define NETDEV_HASHBITS    8
+#define NETDEV_HASHENTRIES (1 << NETDEV_HASHBITS)
 
 struct net {
 	atomic_t		count;		/* To decided when the network
@@ -38,7 +43,8 @@ struct net {
 						 */
 #endif
 	struct list_head	list;		/* list of network namespaces */
-	struct work_struct	work;		/* work struct for freeing */
+	struct list_head	cleanup_list;	/* namespaces on death row */
+	struct list_head	exit_list;	/* Use only net_mutex */
 
 	struct proc_dir_entry 	*proc_net;
 	struct proc_dir_entry 	*proc_net_stat;
@@ -52,6 +58,14 @@ struct net {
 	struct list_head 	dev_base_head;
 	struct hlist_head 	*dev_name_head;
 	struct hlist_head	*dev_index_head;
+	unsigned int		dev_base_seq;   /* protected by rtnl_mutex */
+
+	int			ifindex;
+
+#ifdef CONFIG_VE
+	struct completion	*sysfs_completion;
+	struct ve_struct	*owner_ve;
+#endif
 
 	/* core fib_rules */
 	struct list_head	rules_ops;
@@ -59,6 +73,8 @@ struct net {
 
 	struct sock 		*rtnl;			/* rtnetlink socket */
 	struct sock		*genl_sock;
+	struct sock 		*_audit_sock;		/* audit socket */
+	struct sock 		*uevent_sock;		/* kobject uevent socket */
 
 	struct netns_core	core;
 	struct netns_mib	mib;
@@ -76,6 +92,8 @@ struct net {
 #if defined(CONFIG_NF_CONNTRACK) || defined(CONFIG_NF_CONNTRACK_MODULE)
 	struct netns_ct		ct;
 #endif
+	struct sock		*nfnl;
+	struct sock		*nfnl_stash;
 #endif
 #ifdef CONFIG_XFRM
 	struct netns_xfrm	xfrm;
@@ -84,6 +102,17 @@ struct net {
 	struct sk_buff_head	wext_nlevents;
 #endif
 	struct net_generic	*gen;
+#ifndef __GENKSYMS__
+	unsigned int ipv4_sysctl_ping_group_range[2];
+	struct netns_nf_frag	nf_frag;
+#ifdef CONFIG_XFRM
+	struct dst_ops		xfrm4_dst_ops;
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+	struct dst_ops		xfrm6_dst_ops;
+#endif
+#endif
+	unsigned int		proc_inum;
+#endif
 };
 
 
@@ -112,6 +141,7 @@ static inline struct net *copy_net_ns(unsigned long flags, struct net *net_ns)
 extern struct list_head net_namespace_list;
 
 extern struct net *get_net_ns_by_pid(pid_t pid);
+extern struct net *get_net_ns_by_fd(int pid);
 
 #ifdef CONFIG_NET_NS
 extern void __put_net(struct net *net);
@@ -145,6 +175,12 @@ int net_eq(const struct net *net1, const struct net *net2)
 {
 	return net1 == net2;
 }
+
+/* Returns whether curr can mess with net's objects */
+static inline int net_access_allowed(const struct net *net, const struct net *curr)
+{
+	return net_eq(curr, &init_net) || net_eq(curr, net);
+}
 #else
 
 static inline struct net *get_net(struct net *net)
@@ -163,6 +199,11 @@ static inline struct net *maybe_get_net(struct net *net)
 
 static inline
 int net_eq(const struct net *net1, const struct net *net2)
+{
+	return 1;
+}
+
+static inline int net_access_allowed(const struct net *net, const struct net *curr)
 {
 	return 1;
 }
@@ -232,6 +273,9 @@ struct pernet_operations {
 	struct list_head list;
 	int (*init)(struct net *net);
 	void (*exit)(struct net *net);
+	void (*exit_batch)(struct list_head *net_exit_list);
+	int *id;
+	size_t size;
 };
 
 /*
@@ -255,12 +299,8 @@ struct pernet_operations {
  */
 extern int register_pernet_subsys(struct pernet_operations *);
 extern void unregister_pernet_subsys(struct pernet_operations *);
-extern int register_pernet_gen_subsys(int *id, struct pernet_operations *);
-extern void unregister_pernet_gen_subsys(int id, struct pernet_operations *);
 extern int register_pernet_device(struct pernet_operations *);
 extern void unregister_pernet_device(struct pernet_operations *);
-extern int register_pernet_gen_device(int *id, struct pernet_operations *);
-extern void unregister_pernet_gen_device(int id, struct pernet_operations *);
 
 struct ctl_path;
 struct ctl_table;

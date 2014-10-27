@@ -15,6 +15,7 @@
 #include <linux/lockdep.h>
 #include <linux/module.h>
 #include <linux/sysctl.h>
+#include <linux/utsname.h>
 
 /*
  * The number of tasks checked:
@@ -36,6 +37,8 @@ unsigned long __read_mostly sysctl_hung_task_check_count = PID_MAX_LIMIT;
 unsigned long __read_mostly sysctl_hung_task_timeout_secs = 120;
 
 unsigned long __read_mostly sysctl_hung_task_warnings = 10;
+
+int __read_mostly sysctl_hung_task_verbosity = 0;
 
 static int __read_mostly did_panic;
 
@@ -74,17 +77,11 @@ static void check_hung_task(struct task_struct *t, unsigned long timeout)
 
 	/*
 	 * Ensure the task is not frozen.
-	 * Also, skip vfork and any other user process that freezer should skip.
+	 * Also, when a freshly created task is scheduled once, changes
+	 * its state to TASK_UNINTERRUPTIBLE without having ever been
+	 * switched out once, it musn't be checked.
 	 */
-	if (unlikely(t->flags & (PF_FROZEN | PF_FREEZER_SKIP)))
-	    return;
-
-	/*
-	 * When a freshly created task is scheduled once, changes its state to
-	 * TASK_UNINTERRUPTIBLE without having ever been switched out once, it
-	 * musn't be checked.
-	 */
-	if (unlikely(!switch_count))
+	if (unlikely(t->flags & PF_FROZEN || !switch_count))
 		return;
 
 	if (switch_count != t->last_switch_count) {
@@ -95,14 +92,27 @@ static void check_hung_task(struct task_struct *t, unsigned long timeout)
 		return;
 	sysctl_hung_task_warnings--;
 
+	if (sysctl_hung_task_verbosity & 1)
+		nmi_show_regs(NULL, 0);
+	if (sysctl_hung_task_verbosity & 2)
+		show_state_filter(0);
+	if (sysctl_hung_task_verbosity & 4)
+		show_mem(0);
+	if (sysctl_hung_task_verbosity & 8)
+		show_sched_debug();
+
 	/*
 	 * Ok, the task did not get scheduled for more than 2 minutes,
 	 * complain:
 	 */
-	printk(KERN_ERR "INFO: task %s:%d blocked for more than "
-			"%ld seconds.\n", t->comm, t->pid, timeout);
-	printk(KERN_ERR "\"echo 0 > /proc/sys/kernel/hung_task_timeout_secs\""
-			" disables this message.\n");
+	pr_err("INFO: task %s:%d blocked for more than %ld seconds.\n",
+		t->comm, t->pid, timeout);
+	pr_err("      %s %s %.*s\n",
+		print_tainted(), init_utsname()->release,
+		(int)strcspn(init_utsname()->version, " "),
+		init_utsname()->version);
+	pr_err("\"echo 0 > /proc/sys/kernel/hung_task_timeout_secs\""
+		" disables this message.\n");
 	sched_show_task(t);
 	__debug_show_held_locks(t);
 
@@ -149,7 +159,7 @@ static void check_hung_uninterruptible_tasks(unsigned long timeout)
 		return;
 
 	rcu_read_lock();
-	do_each_thread(g, t) {
+	do_each_thread_all(g, t) {
 		if (!--max_count)
 			goto unlock;
 		if (!--batch_count) {
@@ -162,7 +172,7 @@ static void check_hung_uninterruptible_tasks(unsigned long timeout)
 		/* use "==" to skip the TASK_KILLABLE tasks waiting on NFS */
 		if (t->state == TASK_UNINTERRUPTIBLE)
 			check_hung_task(t, timeout);
-	} while_each_thread(g, t);
+	} while_each_thread_all(g, t);
  unlock:
 	rcu_read_unlock();
 }

@@ -27,11 +27,62 @@ struct cpu_usage_stat {
 	cputime64_t guest;
 };
 
+enum cpu_usage_stat_enum {
+	USER,
+	NICE,
+	SYSTEM,
+	IDLE,
+	IOWAIT,
+	USED,
+	STEAL,
+	NR_STATS,
+};
+
+struct kernel_cpustat {
+	u64 cpustat[NR_STATS];
+};
+
+static inline u64 kernel_cpustat_total_usage(const struct kernel_cpustat *p)
+{
+	return p->cpustat[USER] + p->cpustat[NICE] + p->cpustat[SYSTEM];
+}
+
+static inline u64 kernel_cpustat_total_idle(const struct kernel_cpustat *p)
+{
+	return p->cpustat[IDLE] + p->cpustat[IOWAIT];
+}
+
+static inline void kernel_cpustat_zero(struct kernel_cpustat *p)
+{
+	memset(p, 0, sizeof(*p));
+}
+
+static inline void kernel_cpustat_add(const struct kernel_cpustat *lhs,
+				      const struct kernel_cpustat *rhs,
+				      struct kernel_cpustat *res)
+{
+	int i;
+
+	for (i = 0; i < NR_STATS; i++)
+		res->cpustat[i] = lhs->cpustat[i] + rhs->cpustat[i];
+}
+
+static inline void kernel_cpustat_sub(const struct kernel_cpustat *lhs,
+				      const struct kernel_cpustat *rhs,
+				      struct kernel_cpustat *res)
+{
+	int i;
+
+	for (i = 0; i < NR_STATS; i++)
+		res->cpustat[i] = lhs->cpustat[i] - rhs->cpustat[i];
+}
+
 struct kernel_stat {
 	struct cpu_usage_stat	cpustat;
 #ifndef CONFIG_GENERIC_HARDIRQS
        unsigned int irqs[NR_IRQS];
 #endif
+	unsigned long irqs_sum;
 	unsigned int softirqs[NR_SOFTIRQS];
 };
 
@@ -53,6 +104,7 @@ static inline void kstat_incr_irqs_this_cpu(unsigned int irq,
 					    struct irq_desc *desc)
 {
 	kstat_this_cpu.irqs[irq]++;
+	kstat_this_cpu.irqs_sum++;
 }
 
 static inline unsigned int kstat_irqs_cpu(unsigned int irq, int cpu)
@@ -64,8 +116,9 @@ static inline unsigned int kstat_irqs_cpu(unsigned int irq, int cpu)
 extern unsigned int kstat_irqs_cpu(unsigned int irq, int cpu);
 #define kstat_irqs_this_cpu(DESC) \
 	((DESC)->kstat_irqs[smp_processor_id()])
-#define kstat_incr_irqs_this_cpu(irqno, DESC) \
-	((DESC)->kstat_irqs[smp_processor_id()]++)
+#define kstat_incr_irqs_this_cpu(irqno, DESC) do {\
+	((DESC)->kstat_irqs[smp_processor_id()]++);\
+	kstat_this_cpu.irqs_sum++; } while (0)
 
 #endif
 
@@ -82,6 +135,7 @@ static inline unsigned int kstat_softirqs_cpu(unsigned int irq, int cpu)
 /*
  * Number of interrupts per specific IRQ source, since bootup
  */
+#ifndef CONFIG_GENERIC_HARDIRQS
 static inline unsigned int kstat_irqs(unsigned int irq)
 {
 	unsigned int sum = 0;
@@ -92,7 +146,17 @@ static inline unsigned int kstat_irqs(unsigned int irq)
 
 	return sum;
 }
+#else
+extern unsigned int kstat_irqs(unsigned int irq);
+#endif
 
+/*
+ * Number of interrupts per cpu, since bootup
+ */
+static inline unsigned int kstat_cpu_irqs_sum(unsigned int cpu)
+{
+	return kstat_cpu(cpu).irqs_sum;
+}
 
 /*
  * Lock/unlock the current runqueue - to extract task statistics:

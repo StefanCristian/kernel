@@ -239,7 +239,14 @@ get_unique_tuple(struct nf_conntrack_tuple *tuple,
 	   manips not an issue.  */
 	if (maniptype == IP_NAT_MANIP_SRC &&
 	    !(range->flags & IP_NAT_RANGE_PROTO_RANDOM)) {
-		if (find_appropriate_src(net, orig_tuple, tuple, range)) {
+		/* try the original tuple first */
+		if (in_range(orig_tuple, range)) {
+			if (!nf_nat_used_tuple(orig_tuple, ct)) {
+				*tuple = *orig_tuple;
+				return;
+			}
+		} else if (find_appropriate_src(net, orig_tuple, tuple,
+			   range)) {
 			pr_debug("get_unique_tuple: Found current src map\n");
 			if (!nf_nat_used_tuple(tuple, ct))
 				return;
@@ -275,6 +282,22 @@ out:
 	rcu_read_unlock();
 }
 
+void nf_nat_hash_conntrack(struct net *net, struct nf_conn *ct)
+{
+	unsigned int srchash;
+	struct nf_conn_nat *nat;
+
+	srchash = hash_by_src(net, &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple);
+	spin_lock_bh(&nf_nat_lock);
+	/* nf_conntrack_alter_reply might re-allocate exntension aera */
+	nat = nfct_nat(ct);
+	nat->ct = ct;
+	hlist_add_head_rcu(&nat->bysource,
+			   &net->ipv4.nat_bysource[srchash]);
+	spin_unlock_bh(&nf_nat_lock);
+}
+EXPORT_SYMBOL_GPL(nf_nat_hash_conntrack);
+
 unsigned int
 nf_nat_setup_info(struct nf_conn *ct,
 		  const struct nf_nat_range *range,
@@ -283,7 +306,6 @@ nf_nat_setup_info(struct nf_conn *ct,
 	struct net *net = nf_ct_net(ct);
 	struct nf_conntrack_tuple curr_tuple, new_tuple;
 	struct nf_conn_nat *nat;
-	int have_to_hash = !(ct->status & IPS_NAT_DONE_MASK);
 
 	/* nat helper or nfctnetlink also setup binding */
 	nat = nfct_nat(ct);
@@ -323,19 +345,8 @@ nf_nat_setup_info(struct nf_conn *ct,
 			ct->status |= IPS_DST_NAT;
 	}
 
-	/* Place in source hash if this is the first time. */
-	if (have_to_hash) {
-		unsigned int srchash;
-
-		srchash = hash_by_src(net, &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple);
-		spin_lock_bh(&nf_nat_lock);
-		/* nf_conntrack_alter_reply might re-allocate exntension aera */
-		nat = nfct_nat(ct);
-		nat->ct = ct;
-		hlist_add_head_rcu(&nat->bysource,
-				   &net->ipv4.nat_bysource[srchash]);
-		spin_unlock_bh(&nf_nat_lock);
-	}
+	if (maniptype == IP_NAT_MANIP_SRC)
+		nf_nat_hash_conntrack(net, ct);
 
 	/* It's done. */
 	if (maniptype == IP_NAT_MANIP_DST)
@@ -551,7 +562,7 @@ static void nf_nat_cleanup_conntrack(struct nf_conn *ct)
 	if (nat == NULL || nat->ct == NULL)
 		return;
 
-	NF_CT_ASSERT(nat->ct->status & IPS_NAT_DONE_MASK);
+	NF_CT_ASSERT(nat->ct->status & IPS_SRC_NAT_DONE);
 
 	spin_lock_bh(&nf_nat_lock);
 	hlist_del_rcu(&nat->bysource);
@@ -564,11 +575,10 @@ static void nf_nat_move_storage(void *new, void *old)
 	struct nf_conn_nat *old_nat = old;
 	struct nf_conn *ct = old_nat->ct;
 
-	if (!ct || !(ct->status & IPS_NAT_DONE_MASK))
+	if (!ct || !(ct->status & IPS_SRC_NAT_DONE))
 		return;
 
 	spin_lock_bh(&nf_nat_lock);
-	new_nat->ct = ct;
 	hlist_replace_rcu(&old_nat->bysource, &new_nat->bysource);
 	spin_unlock_bh(&nf_nat_lock);
 }
@@ -676,6 +686,9 @@ nfnetlink_parse_nat_setup(struct nf_conn *ct,
 
 static int __net_init nf_nat_net_init(struct net *net)
 {
+	if (net_ipt_permitted(net, VE_IP_NAT))
+		net_ipt_module_set(net, VE_IP_NAT);
+
 	/* Leave them the same for the moment. */
 	net->ipv4.nat_htable_size = net->ct.htable_size;
 	net->ipv4.nat_bysource = nf_ct_alloc_hashtable(&net->ipv4.nat_htable_size,
@@ -703,6 +716,8 @@ static void __net_exit nf_nat_net_exit(struct net *net)
 	synchronize_rcu();
 	nf_ct_free_hashtable(net->ipv4.nat_bysource, net->ipv4.nat_vmalloced,
 			     net->ipv4.nat_htable_size);
+
+	net_ipt_module_clear(net, VE_IP_NAT);
 }
 
 static struct pernet_operations nf_nat_net_ops = {

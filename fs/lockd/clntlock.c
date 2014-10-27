@@ -78,8 +78,12 @@ EXPORT_SYMBOL_GPL(nlmclnt_init);
  */
 void nlmclnt_done(struct nlm_host *host)
 {
+	struct ve_struct *old_ve;
+
 	nlm_release_host(host);
+	old_ve = set_exec_env(host->owner_env);
 	lockd_down();
+	(void)set_exec_env(old_ve);
 }
 EXPORT_SYMBOL_GPL(nlmclnt_done);
 
@@ -135,6 +139,9 @@ int nlmclnt_block(struct nlm_wait *block, struct nlm_rqst *req, long timeout)
 			timeout);
 	if (ret < 0)
 		return -ERESTARTSYS;
+	/* Reset the lock status after a server reboot so we resend */
+	if (block->b_status == nlm_lck_denied_grace_period)
+		block->b_status = nlm_lck_blocked;
 	req->a_res.status = block->b_status;
 	return 0;
 }
@@ -211,9 +218,11 @@ reclaimer(void *ptr)
 	struct nlm_wait	  *block;
 	struct file_lock *fl, *next;
 	u32 nsmstate;
+	struct ve_struct *old_ve;
 
 	allow_signal(SIGKILL);
 
+	old_ve = set_exec_env(host->owner_env);
 	down_write(&host->h_rwsem);
 
 	/* This one ensures that our parent doesn't terminate while the
@@ -270,5 +279,6 @@ restart:
 	nlm_release_host(host);
 	lockd_down();
 	unlock_kernel();
+	set_exec_env(old_ve);
 	return 0;
 }

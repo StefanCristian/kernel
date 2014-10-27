@@ -33,17 +33,17 @@
 #include <linux/rculist.h>
 #include <linux/bootmem.h>
 #include <linux/hash.h>
+#include <bc/kmem.h>
 #include <linux/pid_namespace.h>
 #include <linux/init_task.h>
 #include <linux/syscalls.h>
+#include <linux/proc_fs.h>
 
 #define pid_hashfn(nr, ns)	\
 	hash_long((unsigned long)nr + (unsigned long)ns, pidhash_shift)
 static struct hlist_head *pid_hash;
 static unsigned int pidhash_shift = 4;
 struct pid init_struct_pid = INIT_STRUCT_PID;
-
-int pid_max = PID_MAX_DEFAULT;
 
 #define RESERVED_PIDS		300
 
@@ -78,6 +78,7 @@ struct pid_namespace init_pid_ns = {
 	.last_pid = 0,
 	.level = 0,
 	.child_reaper = &init_task,
+	.proc_inum = PROC_PID_INIT_INO,
 };
 EXPORT_SYMBOL_GPL(init_pid_ns);
 
@@ -110,9 +111,9 @@ EXPORT_SYMBOL(is_container_init);
  * For now it is easier to be safe than to prove it can't happen.
  */
 
-static  __cacheline_aligned_in_smp DEFINE_SPINLOCK(pidmap_lock);
+__cacheline_aligned_in_smp DEFINE_SPINLOCK(pidmap_lock);
 
-static void free_pidmap(struct upid *upid)
+void free_pidmap(struct upid *upid)
 {
 	int nr = upid->nr;
 	struct pidmap *map = upid->ns->pidmap + nr / BITS_PER_PAGE;
@@ -122,17 +123,54 @@ static void free_pidmap(struct upid *upid)
 	atomic_inc(&map->nr_free);
 }
 
-static int alloc_pidmap(struct pid_namespace *pid_ns)
+/*
+ * If we started walking pids at 'base', is 'a' seen before 'b'?
+ */
+static int pid_before(int base, int a, int b)
+{
+	/*
+	 * This is the same as saying
+	 *
+	 * (a - base + MAXUINT) % MAXUINT < (b - base + MAXUINT) % MAXUINT
+	 * and that mapping orders 'a' and 'b' with respect to 'base'.
+	 */
+	return (unsigned)(a - base) < (unsigned)(b - base);
+}
+
+/*
+ * We might be racing with someone else trying to set pid_ns->last_pid.
+ * We want the winner to have the "later" value, because if the
+ * "earlier" value prevails, then a pid may get reused immediately.
+ *
+ * Since pids rollover, it is not sufficient to just pick the bigger
+ * value.  We have to consider where we started counting from.
+ *
+ * 'base' is the value of pid_ns->last_pid that we observed when
+ * we started looking for a pid.
+ *
+ * 'pid' is the pid that we eventually found.
+ */
+static void set_last_pid(struct pid_namespace *pid_ns, int base, int pid)
+{
+	int prev;
+	int last_write = base;
+	do {
+		prev = last_write;
+		last_write = cmpxchg(&pid_ns->last_pid, prev, pid);
+	} while ((prev != last_write) && (pid_before(base, last_write, pid)));
+}
+
+int alloc_pidmap(struct pid_namespace *pid_ns)
 {
 	int i, offset, max_scan, pid, last = pid_ns->last_pid;
 	struct pidmap *map;
 
 	pid = last + 1;
-	if (pid >= pid_max)
+	if (pid >= pid_ns->pid_max)
 		pid = RESERVED_PIDS;
 	offset = pid & BITS_PER_PAGE_MASK;
 	map = &pid_ns->pidmap[pid/BITS_PER_PAGE];
-	max_scan = (pid_max + BITS_PER_PAGE - 1)/BITS_PER_PAGE - !offset;
+	max_scan = (pid_ns->pid_max + BITS_PER_PAGE - 1)/BITS_PER_PAGE - !offset;
 	for (i = 0; i <= max_scan; ++i) {
 		if (unlikely(!map->page)) {
 			void *page = kzalloc(PAGE_SIZE, GFP_KERNEL);
@@ -153,7 +191,7 @@ static int alloc_pidmap(struct pid_namespace *pid_ns)
 			do {
 				if (!test_and_set_bit(offset, map->page)) {
 					atomic_dec(&map->nr_free);
-					pid_ns->last_pid = pid;
+					set_last_pid(pid_ns, last, pid);
 					return pid;
 				}
 				offset = find_next_offset(map, offset);
@@ -164,11 +202,11 @@ static int alloc_pidmap(struct pid_namespace *pid_ns)
 			 * bitmap block and the final block was the same
 			 * as the starting point, pid is before last_pid.
 			 */
-			} while (offset < BITS_PER_PAGE && pid < pid_max &&
+			} while (offset < BITS_PER_PAGE && pid < pid_ns->pid_max &&
 					(i != max_scan || pid < last ||
 					    !((last+1) & BITS_PER_PAGE_MASK)));
 		}
-		if (map < &pid_ns->pidmap[(pid_max-1)/BITS_PER_PAGE]) {
+		if (map < &pid_ns->pidmap[(pid_ns->pid_max-1)/BITS_PER_PAGE]) {
 			++map;
 			offset = 0;
 		} else {
@@ -180,6 +218,36 @@ static int alloc_pidmap(struct pid_namespace *pid_ns)
 		pid = mk_pid(pid_ns, map, offset);
 	}
 	return -1;
+}
+
+int set_pidmap(struct pid_namespace *pid_ns, pid_t pid)
+{
+	int offset;
+	struct pidmap *map;
+
+	offset = pid & BITS_PER_PAGE_MASK;
+	map = &pid_ns->pidmap[pid/BITS_PER_PAGE];
+	if (unlikely(!map->page)) {
+		void *page = kzalloc(PAGE_SIZE, GFP_KERNEL);
+		/*
+		 * Free the page if someone raced with us
+		 * installing it:
+		 */
+		spin_lock_irq(&pidmap_lock);
+		if (map->page)
+			kfree(page);
+		else
+			map->page = page;
+		spin_unlock_irq(&pidmap_lock);
+		if (unlikely(!map->page))
+			return -ENOMEM;
+	}
+
+	if (test_and_set_bit(offset, map->page))
+		return -EBUSY;
+
+	atomic_dec(&map->nr_free);
+	return pid;
 }
 
 int next_pidmap(struct pid_namespace *pid_ns, unsigned int last)
@@ -217,7 +285,7 @@ void put_pid(struct pid *pid)
 		put_pid_ns(ns);
 	}
 }
-EXPORT_SYMBOL_GPL(put_pid);
+EXPORT_SYMBOL(put_pid);
 
 static void delayed_put_pid(struct rcu_head *rhp)
 {
@@ -232,31 +300,46 @@ void free_pid(struct pid *pid)
 	unsigned long flags;
 
 	spin_lock_irqsave(&pidmap_lock, flags);
-	for (i = 0; i <= pid->level; i++)
-		hlist_del_rcu(&pid->numbers[i].pid_chain);
+	for (i = 0; i <= pid->level; i++) {
+		struct upid *upid = pid->numbers + i;
+		if (!hlist_unhashed(&upid->pid_chain)) {
+			hlist_del_rcu(&upid->pid_chain);
+			if (--upid->ns->nr_hashed == 0)
+				schedule_work(&upid->ns->proc_work);
+		}
+	}
 	spin_unlock_irqrestore(&pidmap_lock, flags);
+	ub_kmem_uncharge(pid->ub,
+		kmem_cache_objuse(pid->numbers[pid->level].ns->pid_cachep));
 
 	for (i = 0; i <= pid->level; i++)
 		free_pidmap(pid->numbers + i);
 
+	put_beancounter(pid->ub);
 	call_rcu(&pid->rcu, delayed_put_pid);
 }
+EXPORT_SYMBOL(free_pid);
 
-struct pid *alloc_pid(struct pid_namespace *ns)
+struct pid *alloc_pid(struct pid_namespace *ns, pid_t vpid)
 {
 	struct pid *pid;
 	enum pid_type type;
 	int i, nr;
 	struct pid_namespace *tmp;
 	struct upid *upid;
+	struct user_beancounter *ub;
 
 	pid = kmem_cache_alloc(ns->pid_cachep, GFP_KERNEL);
 	if (!pid)
 		goto out;
 
 	tmp = ns;
+	pid->level = ns->level;
 	for (i = ns->level; i >= 0; i--) {
-		nr = alloc_pidmap(tmp);
+		if (vpid != 0 && i == ns->level)
+			nr = set_pidmap(tmp, vpid);
+		else
+			nr = alloc_pidmap(tmp);
 		if (nr < 0)
 			goto out_free;
 
@@ -265,17 +348,32 @@ struct pid *alloc_pid(struct pid_namespace *ns)
 		tmp = tmp->parent;
 	}
 
+	if (unlikely(is_child_reaper(pid))) {
+		if (pid_ns_prepare_proc(ns))
+			goto out_free;
+	}
+
+#ifdef CONFIG_BEANCOUNTERS
+	ub = get_exec_ub();
+	if (ub_kmem_charge(ub, kmem_cache_objuse(ns->pid_cachep), GFP_KERNEL))
+		goto out_free;
+	pid->ub = get_beancounter(ub);
+#endif
+
 	get_pid_ns(ns);
-	pid->level = ns->level;
 	atomic_set(&pid->count, 1);
 	for (type = 0; type < PIDTYPE_MAX; ++type)
 		INIT_HLIST_HEAD(&pid->tasks[type]);
 
+	upid = pid->numbers + ns->level;
 	spin_lock_irq(&pidmap_lock);
-	for (i = ns->level; i >= 0; i--) {
-		upid = &pid->numbers[i];
+	for ( ; upid >= pid->numbers; --upid) {
 		hlist_add_head_rcu(&upid->pid_chain,
 				&pid_hash[pid_hashfn(upid->nr, upid->ns)]);
+		if (upid->ns->flags & PID_NS_HIDDEN)
+			while (upid-- > pid->numbers)
+				INIT_HLIST_NODE(&upid->pid_chain);
+		upid->ns->nr_hashed++;
 	}
 	spin_unlock_irq(&pidmap_lock);
 
@@ -290,6 +388,7 @@ out_free:
 	pid = NULL;
 	goto out;
 }
+EXPORT_SYMBOL_GPL(alloc_pid);
 
 struct pid *find_pid_ns(int nr, struct pid_namespace *ns)
 {
@@ -308,9 +407,52 @@ EXPORT_SYMBOL_GPL(find_pid_ns);
 
 struct pid *find_vpid(int nr)
 {
-	return find_pid_ns(nr, current->nsproxy->pid_ns);
+	return find_pid_ns(nr, task_active_pid_ns(current));
 }
 EXPORT_SYMBOL_GPL(find_vpid);
+
+void reattach_pid(struct task_struct *tsk, struct pid *pid)
+{
+	int i;
+	struct pid *old_pid;
+	struct pid_link *link;
+	struct upid *upid;
+
+	link = &tsk->pids[PIDTYPE_PID];
+	old_pid = link->pid;
+
+	hlist_del_rcu(&link->node);
+	link->pid = pid;
+	hlist_add_head_rcu(&link->node, &pid->tasks[PIDTYPE_PID]);
+
+	for (i = PIDTYPE_MAX; --i >= 0; )
+		if (!hlist_empty(&old_pid->tasks[i]))
+			BUG();
+
+	for (i = 0; i < pid->level; i++)
+		hlist_replace_rcu(&old_pid->numbers[i].pid_chain,
+				&pid->numbers[i].pid_chain);
+
+	if (old_pid->level > 0) {
+		upid = &old_pid->numbers[old_pid->level];
+		hlist_del_rcu(&upid->pid_chain);
+	}
+
+	upid = &pid->numbers[pid->level];
+	hlist_add_head_rcu(&upid->pid_chain,
+			&pid_hash[pid_hashfn(upid->nr, upid->ns)]);
+	upid->ns->nr_hashed++; /* see alloc_pid() */
+
+	spin_unlock(&pidmap_lock);
+	write_unlock_irq(&tasklist_lock);
+
+	if (old_pid->level > 0) {
+		upid = &old_pid->numbers[old_pid->level];
+		pid_ns_release_proc(upid->ns);
+	}
+
+	call_rcu(&old_pid->rcu, delayed_put_pid);
+}
 
 /*
  * attach_pid() must be called with the tasklist_lock write-held.
@@ -324,6 +466,7 @@ void attach_pid(struct task_struct *task, enum pid_type type,
 	link->pid = pid;
 	hlist_add_head_rcu(&link->node, &pid->tasks[type]);
 }
+EXPORT_SYMBOL(attach_pid);
 
 static void __change_pid(struct task_struct *task, enum pid_type type,
 			struct pid *new)
@@ -349,6 +492,7 @@ void detach_pid(struct task_struct *task, enum pid_type type)
 {
 	__change_pid(task, type, NULL);
 }
+EXPORT_SYMBOL(detach_pid);
 
 void change_pid(struct task_struct *task, enum pid_type type,
 		struct pid *pid)
@@ -385,11 +529,13 @@ struct task_struct *find_task_by_pid_ns(pid_t nr, struct pid_namespace *ns)
 {
 	return pid_task(find_pid_ns(nr, ns), PIDTYPE_PID);
 }
+EXPORT_SYMBOL(find_task_by_pid_ns);
 
 struct task_struct *find_task_by_vpid(pid_t vnr)
 {
-	return find_task_by_pid_ns(vnr, current->nsproxy->pid_ns);
+	return find_task_by_pid_ns(vnr, task_active_pid_ns(current));
 }
+EXPORT_SYMBOL(find_task_by_vpid);
 
 struct pid *get_task_pid(struct task_struct *task, enum pid_type type)
 {
@@ -401,6 +547,7 @@ struct pid *get_task_pid(struct task_struct *task, enum pid_type type)
 	rcu_read_unlock();
 	return pid;
 }
+EXPORT_SYMBOL_GPL(get_task_pid);
 
 struct task_struct *get_pid_task(struct pid *pid, enum pid_type type)
 {
@@ -412,6 +559,7 @@ struct task_struct *get_pid_task(struct pid *pid, enum pid_type type)
 	rcu_read_unlock();
 	return result;
 }
+EXPORT_SYMBOL_GPL(get_pid_task);
 
 struct pid *find_get_pid(pid_t nr)
 {
@@ -423,7 +571,35 @@ struct pid *find_get_pid(pid_t nr)
 
 	return pid;
 }
-EXPORT_SYMBOL_GPL(find_get_pid);
+EXPORT_SYMBOL(find_get_pid);
+
+pid_t pid_to_vpid(pid_t nr)
+{
+	struct pid *pid;
+
+	pid = find_pid_ns(nr, &init_pid_ns);
+	if (pid)
+		return pid->numbers[pid->level].nr;
+	return -1;
+}
+EXPORT_SYMBOL_GPL(pid_to_vpid);
+
+pid_t vpid_to_pid_ve(pid_t vnr, struct ve_struct *env)
+{
+	struct pid *pid;
+	pid_t nr = -1;
+
+	if (unlikely(ve_is_super(env)))
+		return -1;
+
+	rcu_read_lock();
+	pid = find_pid_ns(vnr, env->ve_ns->pid_ns);
+	if (pid != NULL)
+		nr = pid->numbers[0].nr;
+	rcu_read_unlock();
+
+	return nr;
+}
 
 pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
 {
@@ -437,10 +613,11 @@ pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
 	}
 	return nr;
 }
+EXPORT_SYMBOL_GPL(pid_nr_ns);
 
 pid_t pid_vnr(struct pid *pid)
 {
-	return pid_nr_ns(pid, current->nsproxy->pid_ns);
+	return pid_nr_ns(pid, task_active_pid_ns(current));
 }
 EXPORT_SYMBOL_GPL(pid_vnr);
 
@@ -451,7 +628,7 @@ pid_t __task_pid_nr_ns(struct task_struct *task, enum pid_type type,
 
 	rcu_read_lock();
 	if (!ns)
-		ns = current->nsproxy->pid_ns;
+		ns = task_active_pid_ns(current);
 	if (likely(pid_alive(task))) {
 		if (type != PIDTYPE_PID)
 			task = task->group_leader;
@@ -462,6 +639,16 @@ pid_t __task_pid_nr_ns(struct task_struct *task, enum pid_type type,
 	return nr;
 }
 EXPORT_SYMBOL(__task_pid_nr_ns);
+
+pid_t ve_task_ppid_nr_ns(struct task_struct *tsk, struct pid_namespace *ns)
+{
+	pid_t ppid;
+	ppid = task_tgid_nr_ns(rcu_dereference(tsk->real_parent), ns);
+	/* It's dirty hack. Some old utils don't work if ppid is zero*/
+	if (ppid == 0 && ns->child_reaper != tsk)
+		ppid = 1;
+	return ppid;
+}
 
 pid_t task_tgid_nr_ns(struct task_struct *tsk, struct pid_namespace *ns)
 {
@@ -501,12 +688,12 @@ struct pid *find_ge_pid(int nr, struct pid_namespace *ns)
  */
 void __init pidhash_init(void)
 {
-	int i, pidhash_size;
+	unsigned int i, pidhash_size;
 
 	pid_hash = alloc_large_system_hash("PID", sizeof(*pid_hash), 0, 18,
 					   HASH_EARLY | HASH_SMALL,
 					   &pidhash_shift, NULL, 4096);
-	pidhash_size = 1 << pidhash_shift;
+	pidhash_size = 1U << pidhash_shift;
 
 	for (i = 0; i < pidhash_size; i++)
 		INIT_HLIST_HEAD(&pid_hash[i]);
@@ -514,10 +701,18 @@ void __init pidhash_init(void)
 
 void __init pidmap_init(void)
 {
+	/* bump default and minimum pid_max based on number of cpus */
+	init_pid_ns.pid_max = min(pid_max_max, max_t(int, PID_MAX_DEFAULT,
+				PIDS_PER_CPU_DEFAULT * num_possible_cpus()));
+	pid_max_min = max_t(int, pid_max_min,
+				PIDS_PER_CPU_MIN * num_possible_cpus());
+	pr_info("pid_max: default: %u minimum: %u\n", init_pid_ns.pid_max, pid_max_min);
+
 	init_pid_ns.pidmap[0].page = kzalloc(PAGE_SIZE, GFP_KERNEL);
 	/* Reserve PID 0. We never call free_pidmap(0) */
 	set_bit(0, init_pid_ns.pidmap[0].page);
 	atomic_dec(&init_pid_ns.pidmap[0].nr_free);
+	init_pid_ns.nr_hashed = 1;
 
 	init_pid_ns.pid_cachep = KMEM_CACHE(pid,
 			SLAB_HWCACHE_ALIGN | SLAB_PANIC);

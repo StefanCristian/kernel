@@ -15,6 +15,9 @@ struct netns_frags {
 struct inet_frag_queue {
 	struct hlist_node	list;
 	struct netns_frags	*net;
+#ifdef CONFIG_VE
+	struct ve_struct	*owner_ve;
+#endif
 	struct list_head	lru_list;   /* lru list member */
 	spinlock_t		lock;
 	atomic_t		refcnt;
@@ -28,6 +31,8 @@ struct inet_frag_queue {
 #define INET_FRAG_COMPLETE	4
 #define INET_FRAG_FIRST_IN	2
 #define INET_FRAG_LAST_IN	1
+
+	u16			max_size;
 };
 
 #define INETFRAGS_HASHSZ		64

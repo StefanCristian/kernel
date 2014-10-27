@@ -171,14 +171,10 @@ depopulate:
  */
 static struct rchan_buf *relay_create_buf(struct rchan *chan)
 {
-	struct rchan_buf *buf;
-
-	if (chan->n_subbufs > UINT_MAX / sizeof(size_t *))
-		return NULL;
-
-	buf = kzalloc(sizeof(struct rchan_buf), GFP_KERNEL);
+	struct rchan_buf *buf = kzalloc(sizeof(struct rchan_buf), GFP_KERNEL);
 	if (!buf)
 		return NULL;
+
 	buf->padding = kmalloc(chan->n_subbufs * sizeof(size_t *), GFP_KERNEL);
 	if (!buf->padding)
 		goto free_buf;
@@ -241,7 +237,6 @@ static void relay_destroy_buf(struct rchan_buf *buf)
 static void relay_remove_buf(struct kref *kref)
 {
 	struct rchan_buf *buf = container_of(kref, struct rchan_buf, kref);
-	buf->chan->cb->remove_buf_file(buf->dentry);
 	relay_destroy_buf(buf);
 }
 
@@ -491,6 +486,7 @@ static void relay_close_buf(struct rchan_buf *buf)
 {
 	buf->finalized = 1;
 	del_timer_sync(&buf->timer);
+	buf->chan->cb->remove_buf_file(buf->dentry);
 	kref_put(&buf->kref, relay_remove_buf);
 }
 
@@ -584,8 +580,6 @@ struct rchan *relay_open(const char *base_filename,
 	struct rchan *chan;
 
 	if (!(subbuf_size && n_subbufs))
-		return NULL;
-	if (subbuf_size > UINT_MAX / n_subbufs)
 		return NULL;
 
 	chan = kzalloc(sizeof(struct rchan), GFP_KERNEL);

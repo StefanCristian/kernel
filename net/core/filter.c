@@ -36,6 +36,7 @@
 #include <asm/uaccess.h>
 #include <asm/unaligned.h>
 #include <linux/filter.h>
+#include <linux/if_vlan.h>
 
 /* No hurry in this branch */
 static void *__load_pointer(struct sk_buff *skb, int k)
@@ -291,9 +292,7 @@ load_b:
 			mem[f_k] = X;
 			continue;
 		default:
-			WARN_RATELIMIT(1, "Unknown code:%u jt:%u tf:%u k:%u\n",
-				       fentry->code, fentry->jt,
-				       fentry->jf, fentry->k);
+			WARN_ON(1);
 			return 0;
 		}
 
@@ -309,13 +308,45 @@ load_b:
 			A = skb->pkt_type;
 			continue;
 		case SKF_AD_IFINDEX:
+			if (!skb->dev)
+				return 0;
 			A = skb->dev->ifindex;
+			continue;
+		case SKF_AD_MARK:
+			A = skb->mark;
+			continue;
+		case SKF_AD_QUEUE:
+			A = skb->queue_mapping;
+			continue;
+		case SKF_AD_HATYPE:
+			if (!skb->dev)
+				return 0;
+			A = skb->dev->type;
+			continue;
+		case SKF_AD_RXHASH:
+			A = skb->rxhash;
+			continue;
+		case SKF_AD_CPU:
+			A = raw_smp_processor_id();
+			continue;
+		case SKF_AD_ALU_XOR_X:
+			A ^= X;
+			continue;
+		case SKF_AD_VLAN_TAG:
+			A = vlan_tx_tag_get(skb);
+			continue;
+		case SKF_AD_VLAN_TAG_PRESENT:
+			A = !!vlan_tx_tag_present(skb);
 			continue;
 		case SKF_AD_NLATTR: {
 			struct nlattr *nla;
 
 			if (skb_is_nonlinear(skb))
 				return 0;
+
+			if (skb->len < sizeof(struct nlattr))
+				return 0;
+
 			if (A > skb->len - sizeof(struct nlattr))
 				return 0;
 
@@ -332,11 +363,15 @@ load_b:
 
 			if (skb_is_nonlinear(skb))
 				return 0;
+
+			if (skb->len < sizeof(struct nlattr))
+				return 0;
+
 			if (A > skb->len - sizeof(struct nlattr))
 				return 0;
 
 			nla = (struct nlattr *)&skb->data[A];
-			if (nla->nla_len > A - skb->len)
+			if (nla->nla_len > skb->len - A)
 				return 0;
 
 			nla = nla_find_nested(nla, X);
@@ -505,7 +540,7 @@ int sk_attach_filter(struct sock_fprog *fprog, struct sock *sk)
 	if (fprog->filter == NULL)
 		return -EINVAL;
 
-	fp = sock_kmalloc(sk, fsize+sizeof(*fp), GFP_KERNEL);
+	fp = sock_kmalloc(sk, fsize+sizeof(*fp), GFP_KERNEL_UBC);
 	if (!fp)
 		return -ENOMEM;
 	if (copy_from_user(fp->insns, fprog->filter, fsize)) {

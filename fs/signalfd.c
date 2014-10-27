@@ -28,25 +28,7 @@
 #include <linux/anon_inodes.h>
 #include <linux/signalfd.h>
 #include <linux/syscalls.h>
-
-void signalfd_cleanup(struct sighand_struct *sighand)
-{
-	wait_queue_head_t *wqh = &sighand->signalfd_wqh;
-	/*
-	 * The lockless check can race with remove_wait_queue() in progress,
-	 * but in this case its caller should run under rcu_read_lock() and
-	 * sighand_cachep is SLAB_DESTROY_BY_RCU, we can safely return.
-	 */
-	if (likely(!waitqueue_active(wqh)))
-		return;
-
-	/* wait_queue_t->func(POLLFREE) should do remove_wait_queue() */
-	wake_up_poll(wqh, POLLHUP | POLLFREE);
-}
-
-struct signalfd_ctx {
-	sigset_t sigmask;
-};
+#include <linux/module.h>
 
 static int signalfd_release(struct inode *inode, struct file *file)
 {
@@ -102,7 +84,6 @@ static int signalfd_copyinfo(struct signalfd_siginfo __user *uinfo,
 		 err |= __put_user(kinfo->si_tid, &uinfo->ssi_tid);
 		 err |= __put_user(kinfo->si_overrun, &uinfo->ssi_overrun);
 		 err |= __put_user((long) kinfo->si_ptr, &uinfo->ssi_ptr);
-		 err |= __put_user(kinfo->si_int, &uinfo->ssi_int);
 		break;
 	case __SI_POLL:
 		err |= __put_user(kinfo->si_band, &uinfo->ssi_band);
@@ -112,6 +93,16 @@ static int signalfd_copyinfo(struct signalfd_siginfo __user *uinfo,
 		err |= __put_user((long) kinfo->si_addr, &uinfo->ssi_addr);
 #ifdef __ARCH_SI_TRAPNO
 		err |= __put_user(kinfo->si_trapno, &uinfo->ssi_trapno);
+#endif
+#ifdef BUS_MCEERR_AO
+		/* 
+		 * Other callers might not initialize the si_lsb field,
+		 * so check explicitly for the right codes here.
+		 */
+		if (kinfo->si_code == BUS_MCEERR_AR ||
+		    kinfo->si_code == BUS_MCEERR_AO)
+			err |= __put_user((short) kinfo->si_addr_lsb,
+					  &uinfo->ssi_addr_lsb);
 #endif
 		break;
 	case __SI_CHLD:
@@ -126,7 +117,6 @@ static int signalfd_copyinfo(struct signalfd_siginfo __user *uinfo,
 		err |= __put_user(kinfo->si_pid, &uinfo->ssi_pid);
 		err |= __put_user(kinfo->si_uid, &uinfo->ssi_uid);
 		err |= __put_user((long) kinfo->si_ptr, &uinfo->ssi_ptr);
-		err |= __put_user(kinfo->si_int, &uinfo->ssi_int);
 		break;
 	default:
 		/*
@@ -216,17 +206,17 @@ static ssize_t signalfd_read(struct file *file, char __user *buf, size_t count,
 	return total ? total: ret;
 }
 
-static const struct file_operations signalfd_fops = {
+const struct file_operations signalfd_fops = {
 	.release	= signalfd_release,
 	.poll		= signalfd_poll,
 	.read		= signalfd_read,
 };
+EXPORT_SYMBOL(signalfd_fops);
 
 SYSCALL_DEFINE4(signalfd4, int, ufd, sigset_t __user *, user_mask,
 		size_t, sizemask, int, flags)
 {
 	sigset_t sigmask;
-	struct signalfd_ctx *ctx;
 
 	/* Check the SFD_* constants for consistency.  */
 	BUILD_BUG_ON(SFD_CLOEXEC != O_CLOEXEC);
@@ -241,12 +231,19 @@ SYSCALL_DEFINE4(signalfd4, int, ufd, sigset_t __user *, user_mask,
 	sigdelsetmask(&sigmask, sigmask(SIGKILL) | sigmask(SIGSTOP));
 	signotset(&sigmask);
 
+	return do_signalfd(ufd, &sigmask, flags);
+}
+
+long do_signalfd(int ufd, sigset_t *sigmask, int flags)
+{
+	struct signalfd_ctx *ctx;
+
 	if (ufd == -1) {
 		ctx = kmalloc(sizeof(*ctx), GFP_KERNEL);
 		if (!ctx)
 			return -ENOMEM;
 
-		ctx->sigmask = sigmask;
+		ctx->sigmask = *sigmask;
 
 		/*
 		 * When we call this, the initialization must be complete, since
@@ -266,7 +263,7 @@ SYSCALL_DEFINE4(signalfd4, int, ufd, sigset_t __user *, user_mask,
 			return -EINVAL;
 		}
 		spin_lock_irq(&current->sighand->siglock);
-		ctx->sigmask = sigmask;
+		ctx->sigmask = *sigmask;
 		spin_unlock_irq(&current->sighand->siglock);
 
 		wake_up(&current->sighand->signalfd_wqh);
@@ -275,6 +272,7 @@ SYSCALL_DEFINE4(signalfd4, int, ufd, sigset_t __user *, user_mask,
 
 	return ufd;
 }
+EXPORT_SYMBOL_GPL(do_signalfd);
 
 SYSCALL_DEFINE3(signalfd, int, ufd, sigset_t __user *, user_mask,
 		size_t, sizemask)

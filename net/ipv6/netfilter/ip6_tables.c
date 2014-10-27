@@ -144,7 +144,7 @@ ip6_packet_match(const struct sk_buff *skb,
 		int protohdr;
 		unsigned short _frag_off;
 
-		protohdr = ipv6_find_hdr(skb, protoff, -1, &_frag_off);
+		protohdr = ipv6_find_hdr(skb, protoff, -1, &_frag_off, NULL);
 		if (protohdr < 0) {
 			if (_frag_off == 0)
 				*hotdrop = true;
@@ -351,6 +351,9 @@ ip6t_do_table(struct sk_buff *skb,
 	struct xt_match_param mtpar;
 	struct xt_target_param tgpar;
 
+	if (ve_xt_table_forbidden(table))
+		return NF_ACCEPT;
+
 	/* Initialization */
 	indev = in ? in->name : nulldevname;
 	outdev = out ? out->name : nulldevname;
@@ -382,6 +385,7 @@ ip6t_do_table(struct sk_buff *skb,
 
 		IP_NF_ASSERT(e);
 		IP_NF_ASSERT(back);
+		mtpar.thoff = 0;
 		if (!ip6_packet_match(skb, indev, outdev, &e->ipv6,
 		    &mtpar.thoff, &mtpar.fragoff, &hotdrop) ||
 		    IP6T_MATCH_ITERATE(e, do_match, skb, &mtpar) != 0) {
@@ -649,9 +653,10 @@ find_check_match(struct ip6t_entry_match *m, struct xt_mtchk_param *par,
 	struct xt_match *match;
 	int ret;
 
-	match = try_then_request_module(xt_find_match(AF_INET6, m->u.user.name,
-						      m->u.user.revision),
-					"ip6t_%s", m->u.user.name);
+	match = ve0_try_then_request_module(xt_find_match(AF_INET6,
+							  m->u.user.name,
+							  m->u.user.revision),
+					    "ip6t_%s", m->u.user.name);
 	if (IS_ERR(match) || !match) {
 		duprintf("find_check_match: `%s' not found\n", m->u.user.name);
 		return match ? PTR_ERR(match) : -ENOENT;
@@ -716,10 +721,10 @@ find_check_entry(struct ip6t_entry *e, const char *name, unsigned int size,
 		goto cleanup_matches;
 
 	t = ip6t_get_target(e);
-	target = try_then_request_module(xt_find_target(AF_INET6,
-							t->u.user.name,
-							t->u.user.revision),
-					 "ip6t_%s", t->u.user.name);
+	target = ve0_try_then_request_module(xt_find_target(AF_INET6,
+							    t->u.user.name,
+							    t->u.user.revision),
+					     "ip6t_%s", t->u.user.name);
 	if (IS_ERR(target) || !target) {
 		duprintf("find_check_entry: `%s' not found\n", t->u.user.name);
 		ret = target ? PTR_ERR(target) : -ENOENT;
@@ -1159,8 +1164,8 @@ static int get_info(struct net *net, void __user *user, int *len, int compat)
 	if (compat)
 		xt_compat_lock(AF_INET6);
 #endif
-	t = try_then_request_module(xt_find_table_lock(net, AF_INET6, name),
-				    "ip6table_%s", name);
+	t = ve0_try_then_request_module(xt_find_table_lock(net, AF_INET6, name),
+					"ip6table_%s", name);
 	if (t && !IS_ERR(t)) {
 		struct ip6t_getinfo info;
 		const struct xt_table_info *private = t->private;
@@ -1256,8 +1261,8 @@ __do_replace(struct net *net, const char *name, unsigned int valid_hooks,
 		goto out;
 	}
 
-	t = try_then_request_module(xt_find_table_lock(net, AF_INET6, name),
-				    "ip6table_%s", name);
+	t = ve0_try_then_request_module(xt_find_table_lock(net, AF_INET6, name),
+					"ip6table_%s", name);
 	if (!t || IS_ERR(t)) {
 		ret = t ? PTR_ERR(t) : -ENOENT;
 		goto free_newinfo_counters_untrans;
@@ -1527,9 +1532,10 @@ compat_find_calc_match(struct ip6t_entry_match *m,
 {
 	struct xt_match *match;
 
-	match = try_then_request_module(xt_find_match(AF_INET6, m->u.user.name,
-						      m->u.user.revision),
-					"ip6t_%s", m->u.user.name);
+	match = ve0_try_then_request_module(xt_find_match(AF_INET6,
+							  m->u.user.name,
+							  m->u.user.revision),
+					    "ip6t_%s", m->u.user.name);
 	if (IS_ERR(match) || !match) {
 		duprintf("compat_check_calc_match: `%s' not found\n",
 			 m->u.user.name);
@@ -1612,10 +1618,10 @@ check_compat_entry_size_and_hooks(struct compat_ip6t_entry *e,
 		goto release_matches;
 
 	t = compat_ip6t_get_target(e);
-	target = try_then_request_module(xt_find_target(AF_INET6,
-							t->u.user.name,
-							t->u.user.revision),
-					 "ip6t_%s", t->u.user.name);
+	target = ve0_try_then_request_module(xt_find_target(AF_INET6,
+							    t->u.user.name,
+							    t->u.user.revision),
+					     "ip6t_%s", t->u.user.name);
 	if (IS_ERR(target) || !target) {
 		duprintf("check_compat_entry_size_and_hooks: `%s' not found\n",
 			 t->u.user.name);
@@ -1648,7 +1654,7 @@ check_compat_entry_size_and_hooks(struct compat_ip6t_entry *e,
 out:
 	module_put(t->u.kernel.target->me);
 release_matches:
-	IP6T_MATCH_ITERATE(e, compat_release_match, &j);
+	COMPAT_IP6T_MATCH_ITERATE(e, compat_release_match, &j);
 	return ret;
 }
 
@@ -1898,7 +1904,7 @@ compat_do_ip6t_set_ctl(struct sock *sk, int cmd, void __user *user,
 {
 	int ret;
 
-	if (!capable(CAP_NET_ADMIN))
+	if (!capable(CAP_NET_ADMIN) && !capable(CAP_VE_NET_ADMIN))
 		return -EPERM;
 
 	switch (cmd) {
@@ -2009,7 +2015,7 @@ compat_do_ip6t_get_ctl(struct sock *sk, int cmd, void __user *user, int *len)
 {
 	int ret;
 
-	if (!capable(CAP_NET_ADMIN))
+	if (!capable(CAP_NET_ADMIN) && !capable(CAP_VE_NET_ADMIN))
 		return -EPERM;
 
 	switch (cmd) {
@@ -2031,7 +2037,7 @@ do_ip6t_set_ctl(struct sock *sk, int cmd, void __user *user, unsigned int len)
 {
 	int ret;
 
-	if (!capable(CAP_NET_ADMIN))
+	if (!capable(CAP_NET_ADMIN) && !capable(CAP_VE_NET_ADMIN))
 		return -EPERM;
 
 	switch (cmd) {
@@ -2056,7 +2062,7 @@ do_ip6t_get_ctl(struct sock *sk, int cmd, void __user *user, int *len)
 {
 	int ret;
 
-	if (!capable(CAP_NET_ADMIN))
+	if (!capable(CAP_NET_ADMIN) && !capable(CAP_VE_NET_ADMIN))
 		return -EPERM;
 
 	switch (cmd) {
@@ -2088,10 +2094,11 @@ do_ip6t_get_ctl(struct sock *sk, int cmd, void __user *user, int *len)
 		else
 			target = 0;
 
-		try_then_request_module(xt_find_revision(AF_INET6, rev.name,
-							 rev.revision,
-							 target, &ret),
-					"ip6t_%s", rev.name);
+		ve0_try_then_request_module(xt_find_revision(AF_INET6,
+							     rev.name,
+							     rev.revision,
+							     target, &ret),
+					    "ip6t_%s", rev.name);
 		break;
 	}
 
@@ -2110,7 +2117,7 @@ struct xt_table *ip6t_register_table(struct net *net,
 	int ret;
 	struct xt_table_info *newinfo;
 	struct xt_table_info bootstrap
-		= { 0, 0, 0, { 0 }, { 0 }, { } };
+		= { 0, 0, 0, 0, { 0 }, { 0 }, { } };
 	void *loc_cpu_entry;
 	struct xt_table *new_table;
 
@@ -2255,12 +2262,25 @@ static struct xt_match icmp6_matchstruct __read_mostly = {
 
 static int __net_init ip6_tables_net_init(struct net *net)
 {
-	return xt_proto_init(net, NFPROTO_IPV6);
+	int res;
+
+	if (!net_ipt_permitted(net, VE_IP_IPTABLES6))
+		return 0;
+
+	res = xt_proto_init(net, NFPROTO_IPV6);
+	if (!res)
+		net_ipt_module_set(net, VE_IP_IPTABLES6);
+	return res;
 }
 
 static void __net_exit ip6_tables_net_exit(struct net *net)
 {
+	if (!net_is_ipt_module_set(net, VE_IP_IPTABLES6))
+		return;
+
 	xt_proto_fini(net, NFPROTO_IPV6);
+
+	net_ipt_module_clear(net, VE_IP_IPTABLES6);
 }
 
 static struct pernet_operations ip6_tables_net_ops = {
@@ -2318,88 +2338,11 @@ static void __exit ip6_tables_fini(void)
 	unregister_pernet_subsys(&ip6_tables_net_ops);
 }
 
-/*
- * find the offset to specified header or the protocol number of last header
- * if target < 0. "last header" is transport protocol header, ESP, or
- * "No next header".
- *
- * If target header is found, its offset is set in *offset and return protocol
- * number. Otherwise, return -1.
- *
- * If the first fragment doesn't contain the final protocol header or
- * NEXTHDR_NONE it is considered invalid.
- *
- * Note that non-1st fragment is special case that "the protocol number
- * of last header" is "next header" field in Fragment header. In this case,
- * *offset is meaningless and fragment offset is stored in *fragoff if fragoff
- * isn't NULL.
- *
- */
-int ipv6_find_hdr(const struct sk_buff *skb, unsigned int *offset,
-		  int target, unsigned short *fragoff)
-{
-	unsigned int start = skb_network_offset(skb) + sizeof(struct ipv6hdr);
-	u8 nexthdr = ipv6_hdr(skb)->nexthdr;
-	unsigned int len = skb->len - start;
-
-	if (fragoff)
-		*fragoff = 0;
-
-	while (nexthdr != target) {
-		struct ipv6_opt_hdr _hdr, *hp;
-		unsigned int hdrlen;
-
-		if ((!ipv6_ext_hdr(nexthdr)) || nexthdr == NEXTHDR_NONE) {
-			if (target < 0)
-				break;
-			return -ENOENT;
-		}
-
-		hp = skb_header_pointer(skb, start, sizeof(_hdr), &_hdr);
-		if (hp == NULL)
-			return -EBADMSG;
-		if (nexthdr == NEXTHDR_FRAGMENT) {
-			unsigned short _frag_off;
-			__be16 *fp;
-			fp = skb_header_pointer(skb,
-						start+offsetof(struct frag_hdr,
-							       frag_off),
-						sizeof(_frag_off),
-						&_frag_off);
-			if (fp == NULL)
-				return -EBADMSG;
-
-			_frag_off = ntohs(*fp) & ~0x7;
-			if (_frag_off) {
-				if (target < 0 &&
-				    ((!ipv6_ext_hdr(hp->nexthdr)) ||
-				     hp->nexthdr == NEXTHDR_NONE)) {
-					if (fragoff)
-						*fragoff = _frag_off;
-					return hp->nexthdr;
-				}
-				return -ENOENT;
-			}
-			hdrlen = 8;
-		} else if (nexthdr == NEXTHDR_AUTH)
-			hdrlen = (hp->hdrlen + 2) << 2;
-		else
-			hdrlen = ipv6_optlen(hp);
-
-		nexthdr = hp->nexthdr;
-		len -= hdrlen;
-		start += hdrlen;
-	}
-
-	*offset = start;
-	return nexthdr;
-}
 
 EXPORT_SYMBOL(ip6t_register_table);
 EXPORT_SYMBOL(ip6t_unregister_table);
 EXPORT_SYMBOL(ip6t_do_table);
 EXPORT_SYMBOL(ip6t_ext_hdr);
-EXPORT_SYMBOL(ipv6_find_hdr);
 
 module_init(ip6_tables_init);
 module_exit(ip6_tables_fini);
