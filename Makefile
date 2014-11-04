@@ -2,7 +2,7 @@ VERSION = 3
 PATCHLEVEL = 14
 SUBLEVEL = 22
 EXTRAVERSION =
-NAME = Remembering Coco
+NAME = RogentOS Vasile
 
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"
