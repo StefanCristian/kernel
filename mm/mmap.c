@@ -2770,7 +2770,6 @@ void exit_mmap(struct mm_struct *mm)
 
 	mm->mmap = NULL;
 	mm->mm_rb = RB_ROOT;
-	mm->mmap_cache = NULL;
 	up_write(&mm->mmap_sem);
 
 	WARN_ON(atomic_long_read(&mm->nr_ptes) >
