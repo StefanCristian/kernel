@@ -16,6 +16,8 @@
 #include <asm/vdso.h>
 #include <asm/page.h>
 
+unsigned int __read_mostly vdso_enabled = 1;
+
 extern char vdso_start[], vdso_end[];
 extern unsigned short vdso_sync_cpuid;
 
@@ -167,15 +169,13 @@ static int setup_additional_pages(struct linux_binprm *bprm,
 				  unsigned size)
 {
 	struct mm_struct *mm = current->mm;
-	unsigned long addr = 0;
+	unsigned long addr;
 	int ret;
 
+	if (!vdso_enabled)
+		return 0;
+
 	down_write(&mm->mmap_sem);
-
-#ifdef CONFIG_PAX_RANDMMAP
-	if (!(mm->pax_flags & MF_PAX_RANDMMAP))
-#endif
-
 	addr = vdso_addr(mm->start_stack, size);
 	addr = get_unmapped_area(NULL, addr, size, 0, 0);
 	if (IS_ERR_VALUE(addr)) {
@@ -183,14 +183,16 @@ static int setup_additional_pages(struct linux_binprm *bprm,
 		goto up_fail;
 	}
 
-	mm->context.vdso = addr;
+	current->mm->context.vdso = (void *)addr;
 
 	ret = install_special_mapping(mm, addr, size,
 				      VM_READ|VM_EXEC|
 				      VM_MAYREAD|VM_MAYWRITE|VM_MAYEXEC,
 				      pages);
-	if (ret)
-		mm->context.vdso = 0;
+	if (ret) {
+		current->mm->context.vdso = NULL;
+		goto up_fail;
+	}
 
 up_fail:
 	up_write(&mm->mmap_sem);
@@ -210,3 +212,10 @@ int x32_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
 				      vdsox32_size);
 }
 #endif
+
+static __init int vdso_setup(char *s)
+{
+	vdso_enabled = simple_strtoul(s, NULL, 0);
+	return 0;
+}
+__setup("vdso=", vdso_setup);

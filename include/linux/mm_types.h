@@ -231,6 +231,7 @@ struct vm_region {
 	unsigned long	vm_top;		/* region allocated to here */
 	unsigned long	vm_pgoff;	/* the offset in vm_file corresponding to vm_start */
 	struct file	*vm_file;	/* the backing file or NULL */
+	struct file	*vm_prfile;	/* the virtual backing file or NULL */
 
 	int		vm_usage;	/* region usage count (access under nommu_region_sem) */
 	bool		vm_icache_flushed : 1; /* true if the icache has been flushed for
@@ -299,6 +300,7 @@ struct vm_area_struct {
 	unsigned long vm_pgoff;		/* Offset (within vm_file) in PAGE_SIZE
 					   units, *not* PAGE_CACHE_SIZE */
 	struct file * vm_file;		/* File we map to (can be NULL). */
+	struct file *vm_prfile;		/* shadow of vm_file */
 	void * vm_private_data;		/* was vm_pte (shared mem) */
 
 #ifndef CONFIG_MMU
@@ -307,9 +309,7 @@ struct vm_area_struct {
 #ifdef CONFIG_NUMA
 	struct mempolicy *vm_policy;	/* NUMA policy for the VMA */
 #endif
-
-	struct vm_area_struct *vm_mirror;/* PaX: mirror vma or NULL */
-} __randomize_layout;
+};
 
 struct core_thread {
 	struct task_struct *task;
@@ -455,25 +455,7 @@ struct mm_struct {
 	bool tlb_flush_pending;
 #endif
 	struct uprobes_state uprobes_state;
-
-#if defined(CONFIG_PAX_NOEXEC) || defined(CONFIG_PAX_ASLR)
-	unsigned long pax_flags;
-#endif
-
-#ifdef CONFIG_PAX_DLRESOLVE
-	unsigned long call_dl_resolve;
-#endif
-
-#if defined(CONFIG_PPC32) && defined(CONFIG_PAX_EMUSIGRT)
-	unsigned long call_syscall;
-#endif
-
-#ifdef CONFIG_PAX_ASLR
-	unsigned long delta_mmap;		/* randomized offset */
-	unsigned long delta_stack;		/* randomized offset */
-#endif
-
-} __randomize_layout;
+};
 
 static inline void mm_init_cpumask(struct mm_struct *mm)
 {

@@ -314,8 +314,6 @@ static int queue_gso_packets(struct datapath *dp, struct sk_buff *skb,
 	segs = __skb_gso_segment(skb, NETIF_F_SG, false);
 	if (IS_ERR(segs))
 		return PTR_ERR(segs);
-	if (segs == NULL)
-		return -EINVAL;
 
 	/* Queue all of the segments. */
 	skb = segs;
@@ -805,7 +803,7 @@ static int ovs_flow_cmd_new_or_set(struct sk_buff *skb, struct genl_info *info)
 		if (IS_ERR(acts))
 			goto error;
 
-		ovs_flow_mask_key(&masked_key, &key, &mask);
+		ovs_flow_mask_key(&masked_key, &key, true, &mask);
 		error = ovs_nla_copy_actions(a[OVS_FLOW_ATTR_ACTIONS],
 					     &masked_key, 0, &acts);
 		if (error) {

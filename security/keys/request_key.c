@@ -432,7 +432,6 @@ link_check_failed:
 
 link_prealloc_failed:
 	mutex_unlock(&user->cons_lock);
-	key_put(key);
 	kleave(" = %d [prelink]", ret);
 	return ret;
 

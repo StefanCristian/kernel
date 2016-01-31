@@ -453,22 +453,22 @@ static int gigaset_set_line_ctrl(struct cardstate *cs, unsigned cflag)
 }
 
 static const struct gigaset_ops ops = {
-	.write_cmd = gigaset_write_cmd,
-	.write_room = gigaset_write_room,
-	.chars_in_buffer = gigaset_chars_in_buffer,
-	.brkchars = gigaset_brkchars,
-	.init_bchannel = gigaset_init_bchannel,
-	.close_bchannel = gigaset_close_bchannel,
-	.initbcshw = gigaset_initbcshw,
-	.freebcshw = gigaset_freebcshw,
-	.reinitbcshw = gigaset_reinitbcshw,
-	.initcshw = gigaset_initcshw,
-	.freecshw = gigaset_freecshw,
-	.set_modem_ctrl = gigaset_set_modem_ctrl,
-	.baud_rate = gigaset_baud_rate,
-	.set_line_ctrl = gigaset_set_line_ctrl,
-	.send_skb = gigaset_m10x_send_skb,	/* asyncdata.c */
-	.handle_input = gigaset_m10x_input,	/* asyncdata.c */
+	gigaset_write_cmd,
+	gigaset_write_room,
+	gigaset_chars_in_buffer,
+	gigaset_brkchars,
+	gigaset_init_bchannel,
+	gigaset_close_bchannel,
+	gigaset_initbcshw,
+	gigaset_freebcshw,
+	gigaset_reinitbcshw,
+	gigaset_initcshw,
+	gigaset_freecshw,
+	gigaset_set_modem_ctrl,
+	gigaset_baud_rate,
+	gigaset_set_line_ctrl,
+	gigaset_m10x_send_skb,	/* asyncdata.c */
+	gigaset_m10x_input,	/* asyncdata.c */
 };
 
 
@@ -524,8 +524,17 @@ gigaset_tty_open(struct tty_struct *tty)
 	cs->hw.ser->tty = tty;
 	atomic_set(&cs->hw.ser->refcnt, 1);
 	init_completion(&cs->hw.ser->dead_cmp);
-
 	tty->disc_data = cs;
+
+	/* Set the amount of data we're willing to receive per call
+	 * from the hardware driver to half of the input buffer size
+	 * to leave some reserve.
+	 * Note: We don't do flow control towards the hardware driver.
+	 * If more data is received than will fit into the input buffer,
+	 * it will be dropped and an error will be logged. This should
+	 * never happen as the device is slow and the buffer size ample.
+	 */
+	tty->receive_room = RBUFSIZE/2;
 
 	/* OK.. Initialization of the datastructures and the HW is done.. Now
 	 * startup system and notify the LL that we are ready to run

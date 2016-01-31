@@ -37,7 +37,7 @@ unsigned int pipe_max_size = 1048576;
 /*
  * Minimum pipe size, as required by POSIX
  */
-unsigned int pipe_min_size __read_only = PAGE_SIZE;
+unsigned int pipe_min_size = PAGE_SIZE;
 
 /*
  * We use a start+len construction, which provides full use of the 
@@ -56,7 +56,7 @@ unsigned int pipe_min_size __read_only = PAGE_SIZE;
 
 static void pipe_lock_nested(struct pipe_inode_info *pipe, int subclass)
 {
-	if (atomic_read(&pipe->files))
+	if (pipe->files)
 		mutex_lock_nested(&pipe->mutex, subclass);
 }
 
@@ -71,7 +71,7 @@ EXPORT_SYMBOL(pipe_lock);
 
 void pipe_unlock(struct pipe_inode_info *pipe)
 {
-	if (atomic_read(&pipe->files))
+	if (pipe->files)
 		mutex_unlock(&pipe->mutex);
 }
 EXPORT_SYMBOL(pipe_unlock);
@@ -454,9 +454,9 @@ redo:
 		}
 		if (bufs)	/* More to do? */
 			continue;
-		if (!atomic_read(&pipe->writers))
+		if (!pipe->writers)
 			break;
-		if (!atomic_read(&pipe->waiting_writers)) {
+		if (!pipe->waiting_writers) {
 			/* syscall merging: Usually we must not sleep
 			 * if O_NONBLOCK is set, or if we got some data.
 			 * But if a writer sleeps in kernel space, then
@@ -518,7 +518,7 @@ pipe_write(struct kiocb *iocb, const struct iovec *_iov,
 	ret = 0;
 	__pipe_lock(pipe);
 
-	if (!atomic_read(&pipe->readers)) {
+	if (!pipe->readers) {
 		send_sig(SIGPIPE, current, 0);
 		ret = -EPIPE;
 		goto out;
@@ -568,7 +568,7 @@ redo1:
 	for (;;) {
 		int bufs;
 
-		if (!atomic_read(&pipe->readers)) {
+		if (!pipe->readers) {
 			send_sig(SIGPIPE, current, 0);
 			if (!ret)
 				ret = -EPIPE;
@@ -662,9 +662,9 @@ redo2:
 			kill_fasync(&pipe->fasync_readers, SIGIO, POLL_IN);
 			do_wakeup = 0;
 		}
-		atomic_inc(&pipe->waiting_writers);
+		pipe->waiting_writers++;
 		pipe_wait(pipe);
-		atomic_dec(&pipe->waiting_writers);
+		pipe->waiting_writers--;
 	}
 out:
 	__pipe_unlock(pipe);
@@ -719,7 +719,7 @@ pipe_poll(struct file *filp, poll_table *wait)
 	mask = 0;
 	if (filp->f_mode & FMODE_READ) {
 		mask = (nrbufs > 0) ? POLLIN | POLLRDNORM : 0;
-		if (!atomic_read(&pipe->writers) && filp->f_version != pipe->w_counter)
+		if (!pipe->writers && filp->f_version != pipe->w_counter)
 			mask |= POLLHUP;
 	}
 
@@ -729,7 +729,7 @@ pipe_poll(struct file *filp, poll_table *wait)
 		 * Most Unices do not set POLLERR for FIFOs but on Linux they
 		 * behave exactly like pipes for poll().
 		 */
-		if (!atomic_read(&pipe->readers))
+		if (!pipe->readers)
 			mask |= POLLERR;
 	}
 
@@ -741,7 +741,7 @@ static void put_pipe_info(struct inode *inode, struct pipe_inode_info *pipe)
 	int kill = 0;
 
 	spin_lock(&inode->i_lock);
-	if (atomic_dec_and_test(&pipe->files)) {
+	if (!--pipe->files) {
 		inode->i_pipe = NULL;
 		kill = 1;
 	}
@@ -758,11 +758,11 @@ pipe_release(struct inode *inode, struct file *file)
 
 	__pipe_lock(pipe);
 	if (file->f_mode & FMODE_READ)
-		atomic_dec(&pipe->readers);
+		pipe->readers--;
 	if (file->f_mode & FMODE_WRITE)
-		atomic_dec(&pipe->writers);
+		pipe->writers--;
 
-	if (atomic_read(&pipe->readers) || atomic_read(&pipe->writers)) {
+	if (pipe->readers || pipe->writers) {
 		wake_up_interruptible_sync_poll(&pipe->wait, POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM | POLLERR | POLLHUP);
 		kill_fasync(&pipe->fasync_readers, SIGIO, POLL_IN);
 		kill_fasync(&pipe->fasync_writers, SIGIO, POLL_OUT);
@@ -827,7 +827,7 @@ void free_pipe_info(struct pipe_inode_info *pipe)
 	kfree(pipe);
 }
 
-struct vfsmount *pipe_mnt __read_mostly;
+static struct vfsmount *pipe_mnt __read_mostly;
 
 /*
  * pipefs_dname() is called from d_path().
@@ -857,9 +857,8 @@ static struct inode * get_pipe_inode(void)
 		goto fail_iput;
 
 	inode->i_pipe = pipe;
-	atomic_set(&pipe->files, 2);
-	atomic_set(&pipe->readers, 1);
-	atomic_set(&pipe->writers, 1);
+	pipe->files = 2;
+	pipe->readers = pipe->writers = 1;
 	inode->i_fop = &pipefifo_fops;
 
 	/*
@@ -1038,17 +1037,17 @@ static int fifo_open(struct inode *inode, struct file *filp)
 	spin_lock(&inode->i_lock);
 	if (inode->i_pipe) {
 		pipe = inode->i_pipe;
-		atomic_inc(&pipe->files);
+		pipe->files++;
 		spin_unlock(&inode->i_lock);
 	} else {
 		spin_unlock(&inode->i_lock);
 		pipe = alloc_pipe_info();
 		if (!pipe)
 			return -ENOMEM;
-		atomic_set(&pipe->files, 1);
+		pipe->files = 1;
 		spin_lock(&inode->i_lock);
 		if (unlikely(inode->i_pipe)) {
-			atomic_inc(&inode->i_pipe->files);
+			inode->i_pipe->files++;
 			spin_unlock(&inode->i_lock);
 			free_pipe_info(pipe);
 			pipe = inode->i_pipe;
@@ -1073,10 +1072,10 @@ static int fifo_open(struct inode *inode, struct file *filp)
 	 *  opened, even when there is no process writing the FIFO.
 	 */
 		pipe->r_counter++;
-		if (atomic_inc_return(&pipe->readers) == 1)
+		if (pipe->readers++ == 0)
 			wake_up_partner(pipe);
 
-		if (!is_pipe && !atomic_read(&pipe->writers)) {
+		if (!is_pipe && !pipe->writers) {
 			if ((filp->f_flags & O_NONBLOCK)) {
 				/* suppress POLLHUP until we have
 				 * seen a writer */
@@ -1095,14 +1094,14 @@ static int fifo_open(struct inode *inode, struct file *filp)
 	 *  errno=ENXIO when there is no process reading the FIFO.
 	 */
 		ret = -ENXIO;
-		if (!is_pipe && (filp->f_flags & O_NONBLOCK) && !atomic_read(&pipe->readers))
+		if (!is_pipe && (filp->f_flags & O_NONBLOCK) && !pipe->readers)
 			goto err;
 
 		pipe->w_counter++;
-		if (atomic_inc_return(&pipe->writers) == 1)
+		if (!pipe->writers++)
 			wake_up_partner(pipe);
 
-		if (!is_pipe && !atomic_read(&pipe->readers)) {
+		if (!is_pipe && !pipe->readers) {
 			if (wait_for_partner(pipe, &pipe->r_counter))
 				goto err_wr;
 		}
@@ -1116,11 +1115,11 @@ static int fifo_open(struct inode *inode, struct file *filp)
 	 *  the process can at least talk to itself.
 	 */
 
-		atomic_inc(&pipe->readers);
-		atomic_inc(&pipe->writers);
+		pipe->readers++;
+		pipe->writers++;
 		pipe->r_counter++;
 		pipe->w_counter++;
-		if (atomic_read(&pipe->readers) == 1 || atomic_read(&pipe->writers) == 1)
+		if (pipe->readers == 1 || pipe->writers == 1)
 			wake_up_partner(pipe);
 		break;
 
@@ -1134,13 +1133,13 @@ static int fifo_open(struct inode *inode, struct file *filp)
 	return 0;
 
 err_rd:
-	if (atomic_dec_and_test(&pipe->readers))
+	if (!--pipe->readers)
 		wake_up_interruptible(&pipe->wait);
 	ret = -ERESTARTSYS;
 	goto err;
 
 err_wr:
-	if (atomic_dec_and_test(&pipe->writers))
+	if (!--pipe->writers)
 		wake_up_interruptible(&pipe->wait);
 	ret = -ERESTARTSYS;
 	goto err;
@@ -1218,7 +1217,7 @@ static long pipe_set_size(struct pipe_inode_info *pipe, unsigned long nr_pages)
  * Currently we rely on the pipe array holding a power-of-2 number
  * of pages.
  */
-static inline unsigned long round_pipe_size(unsigned long size)
+static inline unsigned int round_pipe_size(unsigned int size)
 {
 	unsigned long nr_pages;
 
@@ -1266,16 +1265,13 @@ long pipe_fcntl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	switch (cmd) {
 	case F_SETPIPE_SZ: {
-		unsigned long size, nr_pages;
-
-		ret = -EINVAL;
-		if (arg < pipe_min_size)
-			goto out;
+		unsigned int size, nr_pages;
 
 		size = round_pipe_size(arg);
 		nr_pages = size >> PAGE_SHIFT;
 
-		if (size < pipe_min_size)
+		ret = -EINVAL;
+		if (!nr_pages)
 			goto out;
 
 		if (!capable(CAP_SYS_RESOURCE) && size > pipe_max_size) {

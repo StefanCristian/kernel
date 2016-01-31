@@ -11,7 +11,6 @@
  */
 
 #include <linux/wait.h>
-#include <linux/slab.h>
 #include <sound/control.h>
 
 #include "audio.h"
@@ -305,20 +304,14 @@ static void toneport_destruct(struct usb_interface *interface)
 */
 static void toneport_setup(struct usb_line6_toneport *toneport)
 {
-	int *ticks;
+	int ticks;
 	struct usb_line6 *line6 = &toneport->line6;
 	struct usb_device *usbdev = line6->usbdev;
 	u16 idProduct = le16_to_cpu(usbdev->descriptor.idProduct);
 
-	ticks = kmalloc(sizeof(int), GFP_KERNEL);
-	if (ticks == NULL)
-		return;
-
 	/* sync time on device with host: */
-	*ticks = (int)get_seconds();
-	line6_write_data(line6, 0x80c6, ticks, sizeof(int));
-
-	kfree(ticks);
+	ticks = (int)get_seconds();
+	line6_write_data(line6, 0x80c6, &ticks, 4);
 
 	/* enable device: */
 	toneport_send_cmd(usbdev, 0x0301, 0x0000);

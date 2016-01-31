@@ -458,7 +458,7 @@ int line6_read_data(struct usb_line6 *line6, int address, void *data,
 {
 	struct usb_device *usbdev = line6->usbdev;
 	int ret;
-	unsigned char *plen;
+	unsigned char len;
 
 	/* query the serial number: */
 	ret = usb_control_msg(usbdev, usb_sndctrlpipe(usbdev, 0), 0x67,
@@ -471,34 +471,27 @@ int line6_read_data(struct usb_line6 *line6, int address, void *data,
 		return ret;
 	}
 
-	plen = kmalloc(1, GFP_KERNEL);
-	if (plen == NULL)
-		return -ENOMEM;
-
 	/* Wait for data length. We'll get 0xff until length arrives. */
 	do {
 		ret = usb_control_msg(usbdev, usb_rcvctrlpipe(usbdev, 0), 0x67,
 				      USB_TYPE_VENDOR | USB_RECIP_DEVICE |
 				      USB_DIR_IN,
-				      0x0012, 0x0000, plen, 1,
+				      0x0012, 0x0000, &len, 1,
 				      LINE6_TIMEOUT * HZ);
 		if (ret < 0) {
 			dev_err(line6->ifcdev,
 				"receive length failed (error %d)\n", ret);
-			kfree(plen);
 			return ret;
 		}
-	} while (*plen == 0xff);
+	} while (len == 0xff);
 
-	if (*plen != datalen) {
+	if (len != datalen) {
 		/* should be equal or something went wrong */
 		dev_err(line6->ifcdev,
 			"length mismatch (expected %d, got %d)\n",
-			(int)datalen, (int)*plen);
-		kfree(plen);
+			(int)datalen, (int)len);
 		return -EINVAL;
 	}
-	kfree(plen);
 
 	/* receive the result: */
 	ret = usb_control_msg(usbdev, usb_rcvctrlpipe(usbdev, 0), 0x67,
@@ -522,7 +515,7 @@ int line6_write_data(struct usb_line6 *line6, int address, void *data,
 {
 	struct usb_device *usbdev = line6->usbdev;
 	int ret;
-	unsigned char *status;
+	unsigned char status;
 
 	ret = usb_control_msg(usbdev, usb_sndctrlpipe(usbdev, 0), 0x67,
 			      USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_OUT,
@@ -535,33 +528,25 @@ int line6_write_data(struct usb_line6 *line6, int address, void *data,
 		return ret;
 	}
 
-	status = kmalloc(1, GFP_KERNEL);
-	if (status == NULL)
-		return -ENOMEM;
-
 	do {
 		ret = usb_control_msg(usbdev, usb_rcvctrlpipe(usbdev, 0),
 				      0x67,
 				      USB_TYPE_VENDOR | USB_RECIP_DEVICE |
 				      USB_DIR_IN,
 				      0x0012, 0x0000,
-				      status, 1, LINE6_TIMEOUT * HZ);
+				      &status, 1, LINE6_TIMEOUT * HZ);
 
 		if (ret < 0) {
 			dev_err(line6->ifcdev,
 				"receiving status failed (error %d)\n", ret);
-			kfree(status);
 			return ret;
 		}
-	} while (*status == 0xff);
+	} while (status == 0xff);
 
-	if (*status != 0) {
+	if (status != 0) {
 		dev_err(line6->ifcdev, "write failed (error %d)\n", ret);
-		kfree(status);
 		return -EINVAL;
 	}
-
-	kfree(status);
 
 	return 0;
 }

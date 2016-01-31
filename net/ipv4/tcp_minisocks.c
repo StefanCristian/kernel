@@ -27,10 +27,6 @@
 #include <net/inet_common.h>
 #include <net/xfrm.h>
 
-#ifdef CONFIG_GRKERNSEC_BLACKHOLE
-extern int grsec_enable_blackhole;
-#endif
-
 int sysctl_tcp_syncookies __read_mostly = 1;
 EXPORT_SYMBOL(sysctl_tcp_syncookies);
 
@@ -302,7 +298,7 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 			tw->tw_v6_rcv_saddr = sk->sk_v6_rcv_saddr;
 			tw->tw_tclass = np->tclass;
 			tw->tw_flowlabel = be32_to_cpu(np->flow_label & IPV6_FLOWLABEL_MASK);
-			tw->tw_ipv6only = sk->sk_ipv6only;
+			tw->tw_ipv6only = np->ipv6only;
 		}
 #endif
 
@@ -713,10 +709,7 @@ embryonic_reset:
 		 * avoid becoming vulnerable to outside attack aiming at
 		 * resetting legit local connections.
 		 */
-#ifdef CONFIG_GRKERNSEC_BLACKHOLE
-		if (!grsec_enable_blackhole)
-#endif
-			req->rsk_ops->send_reset(sk, skb);
+		req->rsk_ops->send_reset(sk, skb);
 	} else if (fastopen) { /* received a valid RST pkt */
 		reqsk_fastopen_remove(sk, req, true);
 		tcp_reset(sk);

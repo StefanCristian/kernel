@@ -3464,8 +3464,10 @@ static int pktgen_thread_worker(void *arg)
 	pktgen_rem_thread(t);
 
 	/* Wait for kthread_stop */
-	while (!kthread_should_stop()) {
+	for (;;) {
 		set_current_state(TASK_INTERRUPTIBLE);
+		if (kthread_should_stop())
+			break;
 		schedule();
 	}
 	__set_current_state(TASK_RUNNING);
@@ -3719,7 +3721,7 @@ static int __net_init pg_net_init(struct net *net)
 	pn->net = net;
 	INIT_LIST_HEAD(&pn->pktgen_threads);
 	pn->pktgen_exiting = false;
-	pn->proc_dir = proc_mkdir_restrict(PG_PROC_DIR, pn->net->proc_net);
+	pn->proc_dir = proc_mkdir(PG_PROC_DIR, pn->net->proc_net);
 	if (!pn->proc_dir) {
 		pr_warn("cannot create /proc/net/%s\n", PG_PROC_DIR);
 		return -ENODEV;

@@ -126,14 +126,6 @@ static void snmp6_free_dev(struct inet6_dev *idev)
 	snmp_mib_free((void __percpu **)idev->stats.ipv6);
 }
 
-static void in6_dev_finish_destroy_rcu(struct rcu_head *head)
-{
-	struct inet6_dev *idev = container_of(head, struct inet6_dev, rcu);
-
-	snmp6_free_dev(idev);
-	kfree(idev);
-}
-
 /* Nobody refers to this device, we may destroy it. */
 
 void in6_dev_finish_destroy(struct inet6_dev *idev)
@@ -152,6 +144,7 @@ void in6_dev_finish_destroy(struct inet6_dev *idev)
 		pr_warn("Freeing alive inet6 device %p\n", idev);
 		return;
 	}
-	call_rcu(&idev->rcu, in6_dev_finish_destroy_rcu);
+	snmp6_free_dev(idev);
+	kfree_rcu(idev, rcu);
 }
 EXPORT_SYMBOL(in6_dev_finish_destroy);

@@ -71,6 +71,9 @@ ifeq ($(CONFIG_X86_32),y)
         # CPU-specific tuning. Anything which can be shared with UML should go here.
         include $(srctree)/arch/x86/Makefile_32.cpu
         KBUILD_CFLAGS += $(cflags-y)
+
+        # temporary until string.h is fixed
+        KBUILD_CFLAGS += -ffreestanding
 else
         BITS := 64
         UTS_MACHINE := x86_64
@@ -87,11 +90,26 @@ else
 	KBUILD_CFLAGS += $(call cc-option,-mpreferred-stack-boundary=3)
 
         # FIXME - should be integrated in Makefile.cpu (Makefile_32.cpu)
+        cflags-$(CONFIG_MNATIVE) += $(call cc-option,-march=native)
         cflags-$(CONFIG_MK8) += $(call cc-option,-march=k8)
+        cflags-$(CONFIG_MK10) += $(call cc-option,-march=amdfam10)
+        cflags-$(CONFIG_MBARCELONA) += $(call cc-option,-march=barcelona)
+        cflags-$(CONFIG_MBOBCAT) += $(call cc-option,-march=btver1)
+        cflags-$(CONFIG_MBULLDOZER) += $(call cc-option,-march=bdver1)
+        cflags-$(CONFIG_MPILEDRIVER) += $(call cc-option,-march=bdver2)
+        cflags-$(CONFIG_MJAGUAR) += $(call cc-option,-march=btver2)
         cflags-$(CONFIG_MPSC) += $(call cc-option,-march=nocona)
 
         cflags-$(CONFIG_MCORE2) += \
-                $(call cc-option,-march=core2,$(call cc-option,-mtune=generic))
+                $(call cc-option,-march=core2,$(call cc-option,-mtune=core2))
+        cflags-$(CONFIG_MCOREI7) += \
+                $(call cc-option,-march=corei7,$(call cc-option,-mtune=corei7))
+        cflags-$(CONFIG_MCOREI7AVX) += \
+                $(call cc-option,-march=corei7-avx,$(call cc-option,-mtune=corei7-avx))
+        cflags-$(CONFIG_MCOREAVXI) += \
+                $(call cc-option,-march=core-avx-i,$(call cc-option,-mtune=core-avx-i))
+        cflags-$(CONFIG_MCOREAVX2) += \
+                $(call cc-option,-march=core-avx2,$(call cc-option,-mtune=core-avx2))
 	cflags-$(CONFIG_MATOM) += $(call cc-option,-march=atom) \
 		$(call cc-option,-mtune=atom,$(call cc-option,-mtune=generic))
         cflags-$(CONFIG_GENERIC_CPU) += $(call cc-option,-mtune=generic)
@@ -108,9 +126,6 @@ else
         # newer gccs do it by default
         KBUILD_CFLAGS += -maccumulate-outgoing-args
 endif
-
-# temporary until string.h is fixed
-KBUILD_CFLAGS += -ffreestanding
 
 # Make sure compiler does not have buggy stack-protector support.
 ifdef CONFIG_CC_STACKPROTECTOR
@@ -269,12 +284,3 @@ define archhelp
   echo  '                  FDINITRD=file initrd for the booted kernel'
   echo  '  kvmconfig	- Enable additional options for guest kernel support'
 endef
-
-define OLD_LD
-
-*** ${VERSION}.${PATCHLEVEL} PaX kernels no longer build correctly with old versions of binutils.
-*** Please upgrade your binutils to 2.18 or newer
-endef
-
-archprepare:
-	$(if $(LDFLAGS_BUILD_ID),,$(error $(OLD_LD)))

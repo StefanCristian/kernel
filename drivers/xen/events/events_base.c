@@ -1592,7 +1592,7 @@ void xen_irq_resume(void)
 	restore_pirqs();
 }
 
-static struct irq_chip xen_dynamic_chip = {
+static struct irq_chip xen_dynamic_chip __read_mostly = {
 	.name			= "xen-dyn",
 
 	.irq_disable		= disable_dynirq,
@@ -1606,7 +1606,7 @@ static struct irq_chip xen_dynamic_chip = {
 	.irq_retrigger		= retrigger_dynirq,
 };
 
-static struct irq_chip xen_pirq_chip = {
+static struct irq_chip xen_pirq_chip __read_mostly = {
 	.name			= "xen-pirq",
 
 	.irq_startup		= startup_pirq,
@@ -1626,7 +1626,7 @@ static struct irq_chip xen_pirq_chip = {
 	.irq_retrigger		= retrigger_dynirq,
 };
 
-static struct irq_chip xen_percpu_chip = {
+static struct irq_chip xen_percpu_chip __read_mostly = {
 	.name			= "xen-percpu",
 
 	.irq_disable		= disable_dynirq,

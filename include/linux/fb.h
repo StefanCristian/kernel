@@ -304,7 +304,7 @@ struct fb_ops {
 	/* called at KDB enter and leave time to prepare the console */
 	int (*fb_debug_enter)(struct fb_info *info);
 	int (*fb_debug_leave)(struct fb_info *info);
-} __do_const;
+};
 
 #ifdef CONFIG_FB_TILEBLITTING
 #define FB_TILE_CURSOR_NONE        0
@@ -489,6 +489,9 @@ struct fb_info {
 #define FBINFO_STATE_SUSPENDED	1
 	u32 state;			/* Hardware state i.e suspend */
 	void *fbcon_par;                /* fbcon use-only private area */
+
+	struct fb_image bgdecor;
+
 	/* From here on everything is device dependent */
 	void *par;
 	/* we need the PCI or similar aperture base/size not

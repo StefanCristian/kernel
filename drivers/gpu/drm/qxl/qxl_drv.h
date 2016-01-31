@@ -290,10 +290,10 @@ struct qxl_device {
 	unsigned int last_sent_io_cmd;
 
 	/* interrupt handling */
-	atomic_unchecked_t irq_received;
-	atomic_unchecked_t irq_received_display;
-	atomic_unchecked_t irq_received_cursor;
-	atomic_unchecked_t irq_received_io_cmd;
+	atomic_t irq_received;
+	atomic_t irq_received_display;
+	atomic_t irq_received_cursor;
+	atomic_t irq_received_io_cmd;
 	unsigned irq_received_error;
 	wait_queue_head_t display_event;
 	wait_queue_head_t cursor_event;
@@ -325,6 +325,8 @@ struct qxl_device {
 	struct work_struct fb_work;
 
 	struct drm_property *hotplug_mode_update_property;
+	int monitors_config_width;
+	int monitors_config_height;
 };
 
 /* forward declaration for QXL_INFO_IO */

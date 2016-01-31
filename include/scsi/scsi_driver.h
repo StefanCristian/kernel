@@ -15,7 +15,7 @@ struct scsi_driver {
 	struct device_driver	gendrv;
 
 	void (*rescan)(struct device *);
-	unsigned int (*done)(struct scsi_cmnd *);
+	int (*done)(struct scsi_cmnd *);
 	int (*eh_action)(struct scsi_cmnd *, int);
 };
 #define to_scsi_driver(drv) \
