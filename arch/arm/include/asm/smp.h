@@ -74,6 +74,7 @@ struct secondary_data {
 };
 extern struct secondary_data secondary_data;
 extern volatile int pen_release;
+extern void secondary_startup(void);
 
 extern int __cpu_disable(void);
 
@@ -112,7 +113,7 @@ struct smp_operations {
 	int  (*cpu_disable)(unsigned int cpu);
 #endif
 #endif
-};
+} __no_const;
 
 /*
  * set platform specific SMP operations

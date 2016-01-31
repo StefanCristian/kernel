@@ -51,12 +51,12 @@ static struct kmem_cache *sigqueue_cachep;
 
 int print_fatal_signals __read_mostly;
 
-static void __user *sig_handler(struct task_struct *t, int sig)
+static __sighandler_t sig_handler(struct task_struct *t, int sig)
 {
 	return t->sighand->action[sig - 1].sa.sa_handler;
 }
 
-static int sig_handler_ignored(void __user *handler, int sig)
+static int sig_handler_ignored(__sighandler_t handler, int sig)
 {
 	/* Is it explicitly or implicitly ignored? */
 	return handler == SIG_IGN ||
@@ -65,7 +65,7 @@ static int sig_handler_ignored(void __user *handler, int sig)
 
 static int sig_task_ignored(struct task_struct *t, int sig, bool force)
 {
-	void __user *handler;
+	__sighandler_t handler;
 
 	handler = sig_handler(t, sig);
 
@@ -369,6 +369,9 @@ __sigqueue_alloc(int sig, struct task_struct *t, gfp_t flags, int override_rlimi
 	atomic_inc(&user->sigpending);
 	rcu_read_unlock();
 
+	if (!override_rlimit)
+		gr_learn_resource(t, RLIMIT_SIGPENDING, atomic_read(&user->sigpending), 1);
+
 	if (override_rlimit ||
 	    atomic_read(&user->sigpending) <=
 			task_rlimit(t, RLIMIT_SIGPENDING)) {
@@ -496,7 +499,7 @@ flush_signal_handlers(struct task_struct *t, int force_default)
 
 int unhandled_signal(struct task_struct *tsk, int sig)
 {
-	void __user *handler = tsk->sighand->action[sig-1].sa.sa_handler;
+	__sighandler_t handler = tsk->sighand->action[sig-1].sa.sa_handler;
 	if (is_global_init(tsk))
 		return 1;
 	if (handler != SIG_IGN && handler != SIG_DFL)
@@ -815,6 +818,13 @@ static int check_kill_permission(int sig, struct siginfo *info,
 			return -EPERM;
 		}
 	}
+
+	/* allow glibc communication via tgkill to other threads in our
+	   thread group */
+	if ((info == SEND_SIG_NOINFO || info->si_code != SI_TKILL ||
+	     sig != (SIGRTMIN+1) || task_tgid_vnr(t) != info->si_pid)
+	    && gr_handle_signal(t, sig))
+		return -EPERM;
 
 	return security_task_kill(t, info, sig, 0);
 }
@@ -1199,7 +1209,7 @@ __group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p)
 	return send_signal(sig, info, p, 1);
 }
 
-static int
+int
 specific_send_sig_info(int sig, struct siginfo *info, struct task_struct *t)
 {
 	return send_signal(sig, info, t, 0);
@@ -1236,6 +1246,7 @@ force_sig_info(int sig, struct siginfo *info, struct task_struct *t)
 	unsigned long int flags;
 	int ret, blocked, ignored;
 	struct k_sigaction *action;
+	int is_unhandled = 0;
 
 	spin_lock_irqsave(&t->sighand->siglock, flags);
 	action = &t->sighand->action[sig-1];
@@ -1250,8 +1261,17 @@ force_sig_info(int sig, struct siginfo *info, struct task_struct *t)
 	}
 	if (action->sa.sa_handler == SIG_DFL)
 		t->signal->flags &= ~SIGNAL_UNKILLABLE;
+	if (action->sa.sa_handler == SIG_IGN || action->sa.sa_handler == SIG_DFL)
+		is_unhandled = 1;
 	ret = specific_send_sig_info(sig, info, t);
 	spin_unlock_irqrestore(&t->sighand->siglock, flags);
+
+	/* only deal with unhandled signals, java etc trigger SIGSEGV during
+	   normal operation */
+	if (is_unhandled) {
+		gr_log_signal(sig, !is_si_special(info) ? info->si_addr : NULL, t);
+		gr_handle_crash(t, sig);
+	}
 
 	return ret;
 }
@@ -1319,8 +1339,11 @@ int group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p)
 	ret = check_kill_permission(sig, info, p);
 	rcu_read_unlock();
 
-	if (!ret && sig)
+	if (!ret && sig) {
 		ret = do_send_sig_info(sig, info, p, true);
+		if (!ret)
+			gr_log_signal(sig, !is_si_special(info) ? info->si_addr : NULL, p);
+	}
 
 	return ret;
 }
@@ -2768,7 +2791,8 @@ int copy_siginfo_to_user(siginfo_t __user *to, const siginfo_t *from)
 		 * Other callers might not initialize the si_lsb field,
 		 * so check explicitly for the right codes here.
 		 */
-		if (from->si_code == BUS_MCEERR_AR || from->si_code == BUS_MCEERR_AO)
+		if (from->si_signo == SIGBUS &&
+		    (from->si_code == BUS_MCEERR_AR || from->si_code == BUS_MCEERR_AO))
 			err |= __put_user(from->si_addr_lsb, &to->si_addr_lsb);
 #endif
 		break;
@@ -2926,7 +2950,15 @@ do_send_specific(pid_t tgid, pid_t pid, int sig, struct siginfo *info)
 	int error = -ESRCH;
 
 	rcu_read_lock();
-	p = find_task_by_vpid(pid);
+#ifdef CONFIG_GRKERNSEC_CHROOT_FINDTASK
+	/* allow glibc communication via tgkill to other threads in our
+	   thread group */
+	if (grsec_enable_chroot_findtask && info->si_code == SI_TKILL &&
+	    sig == (SIGRTMIN+1) && tgid == info->si_pid)	    
+		p = find_task_by_vpid_unrestricted(pid);
+	else
+#endif
+		p = find_task_by_vpid(pid);
 	if (p && (tgid <= 0 || task_tgid_vnr(p) == tgid)) {
 		error = check_kill_permission(sig, info, p);
 		/*
@@ -3035,7 +3067,7 @@ COMPAT_SYSCALL_DEFINE3(rt_sigqueueinfo,
 			int, sig,
 			struct compat_siginfo __user *, uinfo)
 {
-	siginfo_t info;
+	siginfo_t info = {};
 	int ret = copy_siginfo_from_user32(&info, uinfo);
 	if (unlikely(ret))
 		return ret;
@@ -3081,7 +3113,7 @@ COMPAT_SYSCALL_DEFINE4(rt_tgsigqueueinfo,
 			int, sig,
 			struct compat_siginfo __user *, uinfo)
 {
-	siginfo_t info;
+	siginfo_t info = {};
 
 	if (copy_siginfo_from_user32(&info, uinfo))
 		return -EFAULT;
@@ -3239,8 +3271,8 @@ COMPAT_SYSCALL_DEFINE2(sigaltstack,
 	}
 	seg = get_fs();
 	set_fs(KERNEL_DS);
-	ret = do_sigaltstack((stack_t __force __user *) (uss_ptr ? &uss : NULL),
-			     (stack_t __force __user *) &uoss,
+	ret = do_sigaltstack((stack_t __force_user *) (uss_ptr ? &uss : NULL),
+			     (stack_t __force_user *) &uoss,
 			     compat_user_stack_pointer());
 	set_fs(seg);
 	if (ret >= 0 && uoss_ptr)  {

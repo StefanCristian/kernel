@@ -564,6 +564,8 @@ static int bitmap_read_sb(struct bitmap *bitmap)
 	if (err)
 		return err;
 
+	err = -EINVAL;
+
 	sb = kmap_atomic(sb_page);
 
 	chunksize = le32_to_cpu(sb->chunksize);
@@ -1775,7 +1777,7 @@ void bitmap_status(struct seq_file *seq, struct bitmap *bitmap)
 		   chunk_kb ? "KB" : "B");
 	if (bitmap->storage.file) {
 		seq_printf(seq, ", file: ");
-		seq_path(seq, &bitmap->storage.file->f_path, " \t\n");
+		seq_path(seq, &bitmap->storage.file->f_path, " \t\n\\");
 	}
 
 	seq_printf(seq, "\n");

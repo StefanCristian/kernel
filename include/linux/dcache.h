@@ -123,6 +123,9 @@ struct dentry {
 	unsigned long d_time;		/* used by d_revalidate */
 	void *d_fsdata;			/* fs-specific data */
 
+#ifdef CONFIG_GRKERNSEC_CHROOT_RENAME
+	atomic_t chroot_refcnt;		/* tracks use of directory in chroot */
+#endif
 	struct list_head d_lru;		/* LRU list */
 	struct list_head d_child;	/* child of parent list */
 	struct list_head d_subdirs;	/* our children */
@@ -133,7 +136,7 @@ struct dentry {
 		struct hlist_node d_alias;	/* inode alias list */
 	 	struct rcu_head d_rcu;
 	} d_u;
-};
+} __randomize_layout;
 
 /*
  * dentry->d_lock spinlock nesting subclasses:
@@ -220,6 +223,8 @@ struct dentry_operations {
 #define DCACHE_AUTODIR_TYPE		0x00200000 /* Lookupless directory (presumed automount) */
 #define DCACHE_SYMLINK_TYPE		0x00300000 /* Symlink */
 #define DCACHE_FILE_TYPE		0x00400000 /* Other file type */
+
+#define DCACHE_MAY_FREE			0x00800000
 
 extern seqlock_t rename_lock;
 
@@ -328,7 +333,8 @@ extern int d_validate(struct dentry *, struct dentry *);
 /*
  * helper function for dentry_operations.d_dname() members
  */
-extern char *dynamic_dname(struct dentry *, char *, int, const char *, ...);
+extern __printf(4, 5)
+char *dynamic_dname(struct dentry *, char *, int, const char *, ...);
 extern char *simple_dname(struct dentry *, char *, int);
 
 extern char *__d_path(const struct path *, const struct path *, char *, int);

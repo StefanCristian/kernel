@@ -967,8 +967,6 @@ int copy_siginfo_to_user32(struct compat_siginfo __user *d, const siginfo_t *s)
 
 int copy_siginfo_from_user32(siginfo_t *to, struct compat_siginfo __user *from)
 {
-	memset(to, 0, sizeof *to);
-
 	if (copy_from_user(to, from, 3*sizeof(int)) ||
 	    copy_from_user(to->_sifields._pad,
 			   from->_sifields._pad, SI_PAD_SIZE32))
@@ -1013,7 +1011,7 @@ int handle_rt_signal32(unsigned long sig, struct k_sigaction *ka,
 	/* Save user registers on the stack */
 	frame = &rt_sf->uc.uc_mcontext;
 	addr = frame;
-	if (vdso32_rt_sigtramp && current->mm->context.vdso_base) {
+	if (vdso32_rt_sigtramp && current->mm->context.vdso_base != ~0UL) {
 		sigret = 0;
 		tramp = current->mm->context.vdso_base + vdso32_rt_sigtramp;
 	} else {
