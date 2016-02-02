@@ -1,18 +1,5 @@
 /*
- * Copyright (C) 2005-2015 Junjiro R. Okajima
- *
- * This program, aufs is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * Copyright (C) 2005-2014 Junjiro R. Okajima
  */
 
 /*
@@ -25,6 +12,7 @@
 #ifdef __KERNEL__
 
 #include <linux/fs.h>
+#include <linux/lglock.h>
 #include <linux/mount.h>
 #include <linux/xattr.h>
 #include "debug.h"
@@ -33,7 +21,6 @@
 /* todo: BAD approach!! */
 extern void __mnt_drop_write(struct vfsmount *);
 extern spinlock_t inode_sb_list_lock;
-extern int open_check_o_direct(struct file *f);
 
 /* ---------------------------------------------------------------------- */
 
@@ -82,15 +69,6 @@ static inline int vfsub_native_ro(struct inode *inode)
 int vfsub_update_h_iattr(struct path *h_path, int *did);
 struct file *vfsub_dentry_open(struct path *path, int flags);
 struct file *vfsub_filp_open(const char *path, int oflags, int mode);
-struct vfsub_aopen_args {
-	struct file	*file;
-	unsigned int	open_flag;
-	umode_t		create_mode;
-	int		*opened;
-};
-struct au_branch;
-int vfsub_atomic_open(struct inode *dir, struct dentry *dentry,
-		      struct vfsub_aopen_args *args, struct au_branch *br);
 int vfsub_kern_path(const char *name, unsigned int flags, struct path *path);
 
 struct dentry *vfsub_lookup_one_len(const char *name, struct dentry *parent,
@@ -129,14 +107,12 @@ static inline void vfsub_mnt_drop_write(struct vfsmount *mnt)
 	lockdep_on();
 }
 
-#if 0 /* reserved */
 static inline void vfsub_mnt_drop_write_file(struct file *file)
 {
 	lockdep_off();
 	mnt_drop_write_file(file);
 	lockdep_on();
 }
-#endif
 
 /* ---------------------------------------------------------------------- */
 
@@ -180,6 +156,7 @@ static inline filldir_t au_diractor(int (*func)(struct dir_context *,
 	return (filldir_t)func;
 }
 
+
 static inline loff_t vfsub_f_size_read(struct file *file)
 {
 	return i_size_read(file_inode(file));
@@ -196,13 +173,11 @@ static inline unsigned int vfsub_file_flags(struct file *file)
 	return flags;
 }
 
-#if 0 /* reserved */
 static inline void vfsub_file_accessed(struct file *h_file)
 {
 	file_accessed(h_file);
 	vfsub_update_h_iattr(&h_file->f_path, /*did*/NULL); /*ignore*/
 }
-#endif
 
 static inline void vfsub_touch_atime(struct vfsmount *h_mnt,
 				     struct dentry *h_dentry)
@@ -252,6 +227,34 @@ static inline loff_t vfsub_llseek(struct file *file, loff_t offset, int origin)
 	err = vfs_llseek(file, offset, origin);
 	lockdep_on();
 	return err;
+}
+
+/* ---------------------------------------------------------------------- */
+
+/* dirty workaround for strict type of fmode_t */
+union vfsub_fmu {
+	fmode_t fm;
+	unsigned int ui;
+};
+
+static inline unsigned int vfsub_fmode_to_uint(fmode_t fm)
+{
+	union vfsub_fmu u = {
+		.fm = fm
+	};
+
+	BUILD_BUG_ON(sizeof(u.fm) != sizeof(u.ui));
+
+	return u.ui;
+}
+
+static inline fmode_t vfsub_uint_to_fmode(unsigned int ui)
+{
+	union vfsub_fmu u = {
+		.ui = ui
+	};
+
+	return u.fm;
 }
 
 /* ---------------------------------------------------------------------- */

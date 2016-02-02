@@ -1,18 +1,5 @@
 /*
- * Copyright (C) 2005-2015 Junjiro R. Okajima
- *
- * This program, aufs is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * Copyright (C) 2005-2014 Junjiro R. Okajima
  */
 
 /*
@@ -32,6 +19,7 @@ enum { AuPARENT, AuCHILD, AuParentChild };
 #define AuRen_MNT_WRITE	(1 << 4)
 #define AuRen_DT_DSTDIR	(1 << 5)
 #define AuRen_DIROPQ	(1 << 6)
+#define AuRen_CPUP	(1 << 7)
 #define au_ftest_ren(flags, name)	((flags) & AuRen_##name)
 #define au_fset_ren(flags, name) \
 	do { (flags) |= AuRen_##name; } while (0)
@@ -140,6 +128,20 @@ static void au_ren_rev_rename(int err, struct au_ren_args *a)
 	/* au_set_h_dptr(a->src_dentry, a->btgt, NULL); */
 	if (rerr)
 		RevertFailure("rename %pd", a->src_dentry);
+}
+
+static void au_ren_rev_cpup(int err, struct au_ren_args *a)
+{
+	int rerr;
+
+	a->h_path.dentry = a->dst_h_dentry;
+	/* no delegation since it is just created */
+	rerr = vfsub_unlink(a->dst_h_dir, &a->h_path, /*delegated*/NULL,
+			    /*force*/0);
+	au_set_h_dptr(a->src_dentry, a->btgt, NULL);
+	au_set_dbstart(a->src_dentry, a->src_bstart);
+	if (rerr)
+		RevertFailure("unlink %pd", a->dst_h_dentry);
 }
 
 static void au_ren_rev_whtmp(int err, struct au_ren_args *a)
@@ -376,7 +378,10 @@ out_diropq:
 	if (au_ftest_ren(a->flags, DIROPQ))
 		au_ren_rev_diropq(err, a);
 out_rename:
-	au_ren_rev_rename(err, a);
+	if (!au_ftest_ren(a->flags, CPUP))
+		au_ren_rev_rename(err, a);
+	else
+		au_ren_rev_cpup(err, a);
 	dput(a->h_dst);
 out_whtmp:
 	if (a->thargs)
@@ -635,7 +640,8 @@ static void au_ren_refresh_dir(struct au_ren_args *a)
 		au_cpup_attr_nlink(dir, /*force*/1);
 	}
 
-	au_dir_ts(dir, a->btgt);
+	if (au_ibstart(dir) == a->btgt)
+		au_cpup_attr_timesizes(dir);
 
 	if (au_ftest_ren(a->flags, ISSAMEDIR))
 		return;
@@ -644,7 +650,8 @@ static void au_ren_refresh_dir(struct au_ren_args *a)
 	dir->i_version++;
 	if (au_ftest_ren(a->flags, ISDIR))
 		au_cpup_attr_nlink(dir, /*force*/1);
-	au_dir_ts(dir, a->btgt);
+	if (au_ibstart(dir) == a->btgt)
+		au_cpup_attr_timesizes(dir);
 }
 
 static void au_ren_refresh(struct au_ren_args *a)
@@ -835,10 +842,9 @@ int aufs_rename(struct inode *_src_dir, struct dentry *_src_dentry,
 
 	err = -ENOTDIR;
 	flags = AuLock_FLUSH | AuLock_NOPLM | AuLock_GEN;
-	if (d_is_directory(a->src_dentry)) {
+	if (S_ISDIR(a->src_inode->i_mode)) {
 		au_fset_ren(a->flags, ISDIR);
-		if (unlikely(d_is_positive(a->dst_dentry)
-			     && !d_is_directory(a->dst_dentry)))
+		if (unlikely(a->dst_inode && !S_ISDIR(a->dst_inode->i_mode)))
 			goto out_free;
 		err = aufs_read_and_write_lock2(a->dst_dentry, a->src_dentry,
 						AuLock_DIR | flags);

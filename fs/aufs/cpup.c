@@ -1,18 +1,5 @@
 /*
- * Copyright (C) 2005-2015 Junjiro R. Okajima
- *
- * This program, aufs is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * Copyright (C) 2005-2014 Junjiro R. Okajima
  */
 
 /*
@@ -166,8 +153,6 @@ int cpup_iattr(struct dentry *dst, aufs_bindex_t bindex, struct dentry *h_src,
 	       struct au_cpup_reg_attr *h_src_attr)
 {
 	int err, sbits, icex;
-	unsigned int mnt_flags;
-	unsigned char verbose;
 	struct iattr ia;
 	struct path h_path;
 	struct inode *h_isrc, *h_idst;
@@ -219,11 +204,8 @@ int cpup_iattr(struct dentry *dst, aufs_bindex_t bindex, struct dentry *h_src,
 	}
 
 	icex = br->br_perm & AuBrAttr_ICEX;
-	if (!err) {
-		mnt_flags = au_mntflags(dst->d_sb);
-		verbose = !!au_opt_test(mnt_flags, VERBOSE);
-		err = au_cpup_xattr(h_path.dentry, h_src, icex, verbose);
-	}
+	if (!err)
+		err = au_cpup_xattr(h_path.dentry, h_src, icex);
 
 	return err;
 }
@@ -825,7 +807,7 @@ out:
 	return err;
 }
 
-#if 0 /* reserved */
+#if 0 /* unused */
 struct au_cpup_single_args {
 	int *errp;
 	struct au_cp_generic *cpg;
@@ -881,7 +863,7 @@ static int au_cpup_sio_test(struct au_pin *pin, umode_t mode)
 	return do_sio;
 }
 
-#if 0 /* reserved */
+#if 0 /* unused */
 int au_sio_cpup_single(struct au_cp_generic *cpg, struct dentry *dst_parent)
 {
 	int err, wkq_err;
@@ -1092,7 +1074,7 @@ static int au_cpup_wh(struct au_cp_generic *cpg, struct file *file)
 
 	dget(wh_dentry);
 	h_path.dentry = wh_dentry;
-	if (!d_is_directory(wh_dentry)) {
+	if (!S_ISDIR(wh_dentry->d_inode->i_mode)) {
 		/* no delegation since it is just created */
 		err = vfsub_unlink(h_parent->d_inode, &h_path,
 				   /*delegated*/NULL, /*force*/0);
@@ -1132,7 +1114,7 @@ int au_sio_cpup_wh(struct au_cp_generic *cpg, struct file *file)
 {
 	int err, wkq_err;
 	aufs_bindex_t bdst;
-	struct dentry *dentry, *parent, *h_orph, *h_parent;
+	struct dentry *dentry, *parent, *h_orph, *h_parent, *h_dentry;
 	struct inode *dir, *h_dir, *h_tmpdir;
 	struct au_wbr *wbr;
 	struct au_pin wh_pin, *pin_orig;
@@ -1155,6 +1137,10 @@ int au_sio_cpup_wh(struct au_cp_generic *cpg, struct file *file)
 		h_tmpdir = h_orph->d_inode;
 		au_set_h_iptr(dir, bdst, au_igrab(h_tmpdir), /*flags*/0);
 
+		if (file)
+			h_dentry = au_hf_top(file)->f_dentry;
+		else
+			h_dentry = au_h_dptr(dentry, au_dbstart(dentry));
 		mutex_lock_nested(&h_tmpdir->i_mutex, AuLsc_I_PARENT3);
 		/* todo: au_h_open_pre()? */
 
@@ -1264,7 +1250,7 @@ out:
 
 static int au_cpup_dir(struct dentry *dentry, aufs_bindex_t bdst,
 		       struct au_pin *pin,
-		       struct dentry *h_parent __maybe_unused,
+		       struct dentry *h_parent __maybe_unused ,
 		       void *arg __maybe_unused)
 {
 	struct au_cp_generic cpg = {

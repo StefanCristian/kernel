@@ -1,18 +1,5 @@
 /*
- * Copyright (C) 2005-2015 Junjiro R. Okajima
- *
- * This program, aufs is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * Copyright (C) 2005-2014 Junjiro R. Okajima
  */
 
 #ifndef __AUFS_TYPE_H__
@@ -39,7 +26,7 @@
 
 #include <linux/limits.h>
 
-#define AUFS_VERSION	"3.14-20150928"
+#define AUFS_VERSION	"3.13"
 
 /* todo? move this to linux-2.6.19/include/magic.h */
 #define AUFS_SUPER_MAGIC	('a' << 24 | 'u' << 16 | 'f' << 8 | 's')
@@ -193,10 +180,10 @@ typedef int16_t aufs_bindex_t;
 			       "+" AUFS_BRATTR_COO_REG		\
 			       "+" AUFS_BRATTR_FHSM		\
 			       "+" AUFS_BRATTR_UNPIN		\
-			       "+" AUFS_BRATTR_ICEX_SEC		\
-			       "+" AUFS_BRATTR_ICEX_SYS		\
-			       "+" AUFS_BRATTR_ICEX_USR		\
-			       "+" AUFS_BRATTR_ICEX_OTH		\
+			       "+" AUFS_BRATTR_ICEX_SEC	\
+			       "+" AUFS_BRATTR_ICEX_SYS	\
+			       "+" AUFS_BRATTR_ICEX_USR	\
+			       "+" AUFS_BRATTR_ICEX_OTH	\
 			       "+" AUFS_BRWATTR_NLWH)
 
 typedef struct {

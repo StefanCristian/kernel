@@ -1,18 +1,5 @@
 /*
- * Copyright (C) 2005-2015 Junjiro R. Okajima
- *
- * This program, aufs is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * Copyright (C) 2005-2014 Junjiro R. Okajima
  */
 
 /*
@@ -28,11 +15,11 @@
 
 enum {
 	Opt_br,
-	Opt_add, Opt_del, Opt_mod, Opt_append, Opt_prepend,
-	Opt_idel, Opt_imod,
-	Opt_dirwh, Opt_rdcache, Opt_rdblk, Opt_rdhash,
+	Opt_add, Opt_del, Opt_mod, Opt_reorder, Opt_append, Opt_prepend,
+	Opt_idel, Opt_imod, Opt_ireorder,
+	Opt_dirwh, Opt_rdcache, Opt_rdblk, Opt_rdhash, Opt_rendir,
 	Opt_rdblk_def, Opt_rdhash_def,
-	Opt_xino, Opt_noxino,
+	Opt_xino, Opt_zxino, Opt_noxino,
 	Opt_trunc_xino, Opt_trunc_xino_v, Opt_notrunc_xino,
 	Opt_trunc_xino_path, Opt_itrunc_xino,
 	Opt_trunc_xib, Opt_notrunc_xib,
@@ -40,6 +27,8 @@ enum {
 	Opt_plink, Opt_noplink, Opt_list_plink,
 	Opt_udba,
 	Opt_dio, Opt_nodio,
+	/* Opt_lock, Opt_unlock, */
+	Opt_cmd, Opt_cmd_args,
 	Opt_diropq_a, Opt_diropq_w,
 	Opt_warn_perm, Opt_nowarn_perm,
 	Opt_wbr_copyup, Opt_wbr_create,
@@ -128,6 +117,8 @@ static match_table_t options = {
 	{Opt_dirperm1, "dirperm1"},
 	{Opt_nodirperm1, "nodirperm1"},
 
+	{Opt_rendir, "rendir=%d"},
+
 	{Opt_refrof, "refrof"},
 	{Opt_norefrof, "norefrof"},
 
@@ -200,19 +191,14 @@ static const char *au_optstr(int *val, match_table_t tbl)
 	int v;
 
 	v = *val;
-	if (!v)
-		goto out;
 	p = tbl;
-	while (p->pattern) {
-		if (p->token
-		    && (v & p->token) == p->token) {
+	while (p->token) {
+		if ((v & p->token) == p->token) {
 			*val &= ~p->token;
 			return p->pattern;
 		}
 		p++;
 	}
-
-out:
 	return NULL;
 }
 
@@ -230,17 +216,13 @@ static match_table_t brattr = {
 	{AuBrAttr_COO_REG, AUFS_BRATTR_COO_REG},
 	{AuBrAttr_COO_ALL, AUFS_BRATTR_COO_ALL},
 	{AuBrAttr_UNPIN, AUFS_BRATTR_UNPIN},
-#ifdef CONFIG_AUFS_FHSM
 	{AuBrAttr_FHSM, AUFS_BRATTR_FHSM},
-#endif
-#ifdef CONFIG_AUFS_XATTR
 	{AuBrAttr_ICEX, AUFS_BRATTR_ICEX},
 	{AuBrAttr_ICEX_SEC, AUFS_BRATTR_ICEX_SEC},
 	{AuBrAttr_ICEX_SYS, AUFS_BRATTR_ICEX_SYS},
 	{AuBrAttr_ICEX_TR, AUFS_BRATTR_ICEX_TR},
 	{AuBrAttr_ICEX_USR, AUFS_BRATTR_ICEX_USR},
 	{AuBrAttr_ICEX_OTH, AUFS_BRATTR_ICEX_OTH},
-#endif
 
 	/* ro/rr branch */
 	{AuBrRAttr_WH, AUFS_BRRATTR_WH},
@@ -632,6 +614,7 @@ static void dump_opts(struct au_opts *opts)
 			u.xino_itrunc = &opt->xino_itrunc;
 			AuDbg("trunc_xino %d\n", u.xino_itrunc->bindex);
 			break;
+
 		case Opt_noxino:
 			AuLabel(noxino);
 			break;

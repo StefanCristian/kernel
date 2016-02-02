@@ -1,18 +1,5 @@
 /*
- * Copyright (C) 2005-2015 Junjiro R. Okajima
- *
- * This program, aufs is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * Copyright (C) 2005-2014 Junjiro R. Okajima
  */
 
 /*
@@ -139,7 +126,7 @@ static char *au_hfsn_name(u32 mask)
 	test_ret(FS_UNMOUNT);
 	test_ret(FS_Q_OVERFLOW);
 	test_ret(FS_IN_IGNORED);
-	test_ret(FS_ISDIR);
+	test_ret(FS_IN_ISDIR);
 	test_ret(FS_IN_ONESHOT);
 	test_ret(FS_EVENT_ON_CHILD);
 	return "";
@@ -161,27 +148,27 @@ static void au_hfsn_free_group(struct fsnotify_group *group)
 }
 
 static int au_hfsn_handle_event(struct fsnotify_group *group,
-				struct inode *inode,
 				struct fsnotify_mark *inode_mark,
 				struct fsnotify_mark *vfsmount_mark,
-				u32 mask, void *data, int data_type,
-				const unsigned char *file_name, u32 cookie)
+				struct fsnotify_event *event)
 {
 	int err;
 	struct au_hnotify *hnotify;
 	struct inode *h_dir, *h_inode;
-	struct qstr h_child_qstr = QSTR_INIT(file_name, strlen(file_name));
+	__u32 mask;
+	struct qstr h_child_qstr = QSTR_INIT(event->file_name, event->name_len);
 
-	AuDebugOn(data_type != FSNOTIFY_EVENT_INODE);
+	AuDebugOn(event->data_type != FSNOTIFY_EVENT_INODE);
 
 	err = 0;
 	/* if FS_UNMOUNT happens, there must be another bug */
+	mask = event->mask;
 	AuDebugOn(mask & FS_UNMOUNT);
 	if (mask & (FS_IN_IGNORED | FS_UNMOUNT))
 		goto out;
 
-	h_dir = inode;
-	h_inode = NULL;
+	h_dir = event->to_tell;
+	h_inode = event->inode;
 #ifdef AuDbgHnotify
 	au_debug_on();
 	if (1 || h_child_qstr.len != sizeof(AUFS_XINO_FNAME) - 1
@@ -202,7 +189,21 @@ out:
 	return err;
 }
 
+/* isn't it waste to ask every registered 'group'? */
+/* copied from linux/fs/notify/inotify/inotify_fsnotiry.c */
+/* it should be exported to modules */
+static bool au_hfsn_should_send_event(struct fsnotify_group *group,
+				      struct inode *h_inode,
+				      struct fsnotify_mark *inode_mark,
+				      struct fsnotify_mark *vfsmount_mark,
+				      __u32 mask, void *data, int data_type)
+{
+	mask = (mask & ~FS_EVENT_ON_CHILD);
+	return inode_mark->mask & mask;
+}
+
 static struct fsnotify_ops au_hfsn_ops = {
+	.should_send_event	= au_hfsn_should_send_event,
 	.handle_event		= au_hfsn_handle_event,
 	.free_group_priv	= au_hfsn_free_group
 };

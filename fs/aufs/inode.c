@@ -1,18 +1,5 @@
 /*
- * Copyright (C) 2005-2015 Junjiro R. Okajima
- *
- * This program, aufs is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * Copyright (C) 2005-2014 Junjiro R. Okajima
  */
 
 /*
@@ -334,7 +321,7 @@ out:
 /* todo: return with unlocked? */
 struct inode *au_new_inode(struct dentry *dentry, int must_new)
 {
-	struct inode *inode;
+	struct inode *inode, *h_inode;
 	struct dentry *h_dentry;
 	struct super_block *sb;
 	struct mutex *mtx;
@@ -345,14 +332,15 @@ struct inode *au_new_inode(struct dentry *dentry, int must_new)
 	sb = dentry->d_sb;
 	bstart = au_dbstart(dentry);
 	h_dentry = au_h_dptr(dentry, bstart);
-	h_ino = h_dentry->d_inode->i_ino;
+	h_inode = h_dentry->d_inode;
+	h_ino = h_inode->i_ino;
 
 	/*
 	 * stop 'race'-ing between hardlinks under different
 	 * parents.
 	 */
 	mtx = NULL;
-	if (!d_is_directory(h_dentry))
+	if (!S_ISDIR(h_inode->i_mode))
 		mtx = &au_sbr(sb, bstart)->br_xino.xi_nondir_mtx;
 
 new_ino:
@@ -380,10 +368,10 @@ new_ino:
 	AuDbg("%lx, new %d\n", inode->i_state, !!(inode->i_state & I_NEW));
 	if (inode->i_state & I_NEW) {
 		/* verbose coding for lock class name */
-		if (unlikely(d_is_symlink(h_dentry)))
+		if (unlikely(S_ISLNK(h_inode->i_mode)))
 			au_rw_class(&au_ii(inode)->ii_rwsem,
 				    au_lc_key + AuLcSymlink_IIINFO);
-		else if (unlikely(d_is_directory(h_dentry)))
+		else if (unlikely(S_ISDIR(h_inode->i_mode)))
 			au_rw_class(&au_ii(inode)->ii_rwsem,
 				    au_lc_key + AuLcDir_IIINFO);
 		else /* likely */

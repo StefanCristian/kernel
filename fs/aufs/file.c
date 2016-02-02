@@ -1,18 +1,5 @@
 /*
- * Copyright (C) 2005-2015 Junjiro R. Okajima
- *
- * This program, aufs is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * Copyright (C) 2005-2014 Junjiro R. Okajima
  */
 
 /*
@@ -43,7 +30,7 @@ struct file *au_h_open(struct dentry *dentry, aufs_bindex_t bindex, int flags,
 	struct super_block *sb;
 	struct au_branch *br;
 	struct path h_path;
-	int err;
+	int err, exec_flag;
 
 	/* a race condition can happen between open and unlink/rmdir */
 	h_file = ERR_PTR(-ENOENT);
@@ -64,9 +51,9 @@ struct file *au_h_open(struct dentry *dentry, aufs_bindex_t bindex, int flags,
 
 	sb = dentry->d_sb;
 	br = au_sbr(sb, bindex);
-	err = au_br_test_oflag(flags, br);
-	h_file = ERR_PTR(err);
-	if (unlikely(err))
+	h_file = ERR_PTR(-EACCES);
+	exec_flag = flags & __FMODE_EXEC;
+	if (exec_flag && (au_br_mnt(br)->mnt_flags & MNT_NOEXEC))
 		goto out;
 
 	/* drop flags for writing */
@@ -92,7 +79,7 @@ struct file *au_h_open(struct dentry *dentry, aufs_bindex_t bindex, int flags,
 	if (IS_ERR(h_file))
 		goto out_br;
 
-	if (flags & __FMODE_EXEC) {
+	if (exec_flag) {
 		err = deny_write_access(h_file);
 		if (unlikely(err)) {
 			fput(h_file);
@@ -224,43 +211,24 @@ out:
 	return err;
 }
 
-int au_do_open(struct file *file, struct au_do_open_args *args)
+int au_do_open(struct file *file, int (*open)(struct file *file, int flags),
+	       struct au_fidir *fidir)
 {
-	int err, no_lock = args->no_lock;
+	int err;
 	struct dentry *dentry;
 	struct au_finfo *finfo;
 
-	if (!no_lock)
-		err = au_finfo_init(file, args->fidir);
-	else {
-		lockdep_off();
-		err = au_finfo_init(file, args->fidir);
-		lockdep_on();
-	}
+	err = au_finfo_init(file, fidir);
 	if (unlikely(err))
 		goto out;
 
 	dentry = file->f_dentry;
-	AuDebugOn(IS_ERR_OR_NULL(dentry));
-	if (!no_lock) {
-		di_write_lock_child(dentry);
-		err = au_cmoo(dentry);
-		di_downgrade_lock(dentry, AuLock_IR);
-		if (!err)
-			err = args->open(file, vfsub_file_flags(file), NULL);
-		di_read_unlock(dentry, AuLock_IR);
-	} else {
-		err = au_cmoo(dentry);
-		if (!err)
-			err = args->open(file, vfsub_file_flags(file),
-					 args->h_file);
-		if (!err && au_fbstart(file) != au_dbstart(dentry))
-			/*
-			 * cmoo happens after h_file was opened.
-			 * need to refresh file later.
-			 */
-			atomic_dec(&au_fi(file)->fi_generation);
-	}
+	di_write_lock_child(dentry);
+	err = au_cmoo(dentry);
+	di_downgrade_lock(dentry, AuLock_IR);
+	if (!err)
+		err = open(file, vfsub_file_flags(file));
+	di_read_unlock(dentry, AuLock_IR);
 
 	finfo = au_fi(file);
 	if (!err) {
@@ -268,13 +236,7 @@ int au_do_open(struct file *file, struct au_do_open_args *args)
 		au_sphl_add(&finfo->fi_hlist,
 			    &au_sbi(file->f_dentry->d_sb)->si_files);
 	}
-	if (!no_lock)
-		fi_write_unlock(file);
-	else {
-		lockdep_off();
-		fi_write_unlock(file);
-		lockdep_on();
-	}
+	fi_write_unlock(file);
 	if (unlikely(err)) {
 		finfo->fi_hdir = NULL;
 		au_finfo_fin(file);
@@ -412,7 +374,7 @@ int au_ready_to_write(struct file *file, loff_t len, struct au_pin *pin)
 {
 	int err;
 	aufs_bindex_t dbstart;
-	struct dentry *parent;
+	struct dentry *parent, *h_dentry;
 	struct inode *inode;
 	struct super_block *sb;
 	struct file *h_file;
@@ -455,9 +417,13 @@ int au_ready_to_write(struct file *file, loff_t len, struct au_pin *pin)
 	if (unlikely(err))
 		goto out_dgrade;
 
+	h_dentry = au_hf_top(file)->f_dentry;
 	dbstart = au_dbstart(cpg.dentry);
-	if (dbstart <= cpg.bdst)
+	if (dbstart <= cpg.bdst) {
+		h_dentry = au_h_dptr(cpg.dentry, cpg.bdst);
+		AuDebugOn(!h_dentry);
 		cpg.bsrc = cpg.bdst;
+	}
 
 	if (dbstart <= cpg.bdst		/* just reopen */
 	    || !d_unhashed(cpg.dentry)	/* copyup and reopen */

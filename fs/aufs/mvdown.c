@@ -1,18 +1,5 @@
 /*
- * Copyright (C) 2011-2015 Junjiro R. Okajima
- *
- * This program, aufs is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * Copyright (C) 2011-2014 Junjiro R. Okajima
  */
 
 /*
@@ -389,7 +376,7 @@ static int au_mvd_args_busy(const unsigned char dmsg, struct au_mvd_args *a)
 	err = 0;
 	plinked = !!au_opt_test(au_mntflags(a->sb), PLINK);
 	if (au_dbstart(a->dentry) == a->mvd_bsrc
-	    && au_dcount(a->dentry) == 1
+	    && d_count(a->dentry) == 1
 	    && atomic_read(&a->inode->i_count) == 1
 	    /* && a->mvd_h_src_inode->i_nlink == 1 */
 	    && (!plinked || !au_plink_test(a->inode))
@@ -398,8 +385,8 @@ static int au_mvd_args_busy(const unsigned char dmsg, struct au_mvd_args *a)
 
 	err = -EBUSY;
 	AU_MVD_PR(dmsg,
-		  "b%d, d{b%d, c%d?}, i{c%d?, l%u}, hi{l%u}, p{%d, %d}\n",
-		  a->mvd_bsrc, au_dbstart(a->dentry), au_dcount(a->dentry),
+		  "b%d, d{b%d, c%u?}, i{c%d?, l%u}, hi{l%u}, p{%d, %d}\n",
+		  a->mvd_bsrc, au_dbstart(a->dentry), d_count(a->dentry),
 		  atomic_read(&a->inode->i_count), a->inode->i_nlink,
 		  a->mvd_h_src_inode->i_nlink,
 		  plinked, plinked ? au_plink_test(a->inode) : 0);
