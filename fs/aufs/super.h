@@ -1,5 +1,18 @@
 /*
- * Copyright (C) 2005-2014 Junjiro R. Okajima
+ * Copyright (C) 2005-2015 Junjiro R. Okajima
+ *
+ * This program, aufs is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 /*
@@ -104,7 +117,7 @@ struct au_sbinfo {
 	/* branch management */
 	unsigned int		si_generation;
 
-	/* see above flags */
+	/* see AuSi_ flags */
 	unsigned char		au_si_status;
 
 	aufs_bindex_t		si_bend;
@@ -153,6 +166,9 @@ struct au_sbinfo {
 	atomic_t		si_xigen_next;
 #endif
 
+	/* dirty trick to suppoer atomic_open */
+	struct au_sphlhead	si_aopen;
+
 	/* vdir parameters */
 	unsigned long		si_rdcache;	/* max cache time in jiffies */
 	unsigned int		si_rdblk;	/* deblk size */
@@ -165,12 +181,6 @@ struct au_sbinfo {
 	 * Otherwise, remove all whiteouts and the dir in rmdir(2).
 	 */
 	unsigned int		si_dirwh;
-
-	/*
-	 * rename(2) a directory with all children.
-	 */
-	/* reserved for future use */
-	/* int			si_rendir; */
 
 	/* pseudo_link list */
 	struct au_sphlhead	si_plink[AuPlink_NHASH];
@@ -526,7 +536,7 @@ static inline int si_noflush_write_trylock(struct super_block *sb)
 	return locked;
 }
 
-#if 0 /* unused */
+#if 0 /* reserved */
 static inline int si_read_trylock(struct super_block *sb, int flags)
 {
 	if (au_ftest_lock(flags, FLUSH))
@@ -541,7 +551,7 @@ static inline void si_read_unlock(struct super_block *sb)
 	__si_read_unlock(sb);
 }
 
-#if 0 /* unused */
+#if 0 /* reserved */
 static inline int si_write_trylock(struct super_block *sb, int flags)
 {
 	if (au_ftest_lock(flags, FLUSH))
@@ -556,7 +566,7 @@ static inline void si_write_unlock(struct super_block *sb)
 	__si_write_unlock(sb);
 }
 
-#if 0 /* unused */
+#if 0 /* reserved */
 static inline void si_downgrade_lock(struct super_block *sb)
 {
 	__si_downgrade_lock(sb);

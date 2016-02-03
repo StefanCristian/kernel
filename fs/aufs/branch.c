@@ -1,5 +1,18 @@
 /*
- * Copyright (C) 2005-2014 Junjiro R. Okajima
+ * Copyright (C) 2005-2015 Junjiro R. Okajima
+ *
+ * This program, aufs is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 /*
@@ -656,7 +669,7 @@ static int test_dentry_busy(struct dentry *root, aufs_bindex_t bindex,
 		ndentry = dpage->ndentry;
 		for (j = 0; !err && j < ndentry; j++) {
 			d = dpage->dentries[j];
-			AuDebugOn(!d_count(d));
+			AuDebugOn(au_dcount(d) <= 0);
 			if (!au_digen_test(d, sigen)) {
 				di_read_lock_child(d, AuLock_IR);
 				if (unlikely(au_dbrange_test(d))) {
@@ -818,7 +831,6 @@ static int test_file_busy(struct super_block *sb, aufs_bindex_t br_id,
 	unsigned long long ull, max;
 	aufs_bindex_t bstart;
 	struct file *file, **array;
-	struct inode *inode;
 	struct dentry *root;
 	struct au_hfile *hfile;
 
@@ -839,8 +851,7 @@ static int test_file_busy(struct super_block *sb, aufs_bindex_t br_id,
 		/* AuDbg("%pD\n", file); */
 		fi_read_lock(file);
 		bstart = au_fbstart(file);
-		inode = file_inode(file);
-		if (!S_ISDIR(inode->i_mode)) {
+		if (!d_is_directory(file->f_path.dentry)) {
 			hfile = &au_fi(file)->fi_htop;
 			if (hfile->hf_br->br_id == br_id)
 				err = -EBUSY;
@@ -873,7 +884,7 @@ static void br_del_file(struct file **to_free, unsigned long long opened,
 			break;
 
 		/* AuDbg("%pD\n", file); */
-		AuDebugOn(!S_ISDIR(file_inode(file)->i_mode));
+		AuDebugOn(!d_is_directory(file->f_path.dentry));
 		bfound = -1;
 		fidir = au_fi(file)->fi_hdir;
 		AuDebugOn(!fidir);

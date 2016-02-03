@@ -159,8 +159,15 @@ static struct srcu_struct pmus_srcu;
  *   0 - disallow raw tracepoint access for unpriv
  *   1 - disallow cpu events for unpriv
  *   2 - disallow kernel profiling for unpriv
+ *   3 - disallow all unpriv perf event use
  */
-int sysctl_perf_event_paranoid __read_mostly = 1;
+#ifdef CONFIG_GRKERNSEC_PERF_HARDEN
+int sysctl_perf_event_legitimately_concerned __read_only = 3;
+#elif defined(CONFIG_GRKERNSEC_HIDESYM)
+int sysctl_perf_event_legitimately_concerned __read_only = 2;
+#else
+int sysctl_perf_event_legitimately_concerned __read_only = 1;
+#endif
 
 /* Minimum for 512 kiB + 1 user control page */
 int sysctl_perf_event_mlock __read_mostly = 512 + (PAGE_SIZE / 1024); /* 'free' kiB per user */
@@ -186,7 +193,7 @@ void update_perf_cpu_limits(void)
 
 	tmp *= sysctl_perf_cpu_time_max_percent;
 	do_div(tmp, 100);
-	ACCESS_ONCE(perf_sample_allowed_ns) = tmp;
+	ACCESS_ONCE_RW(perf_sample_allowed_ns) = tmp;
 }
 
 static int perf_rotate_context(struct perf_cpu_context *cpuctx);
@@ -273,7 +280,7 @@ void perf_sample_event_took(u64 sample_len_ns)
 	update_perf_cpu_limits();
 }
 
-static atomic64_t perf_event_id;
+static atomic64_unchecked_t perf_event_id;
 
 static void cpu_ctx_sched_out(struct perf_cpu_context *cpuctx,
 			      enum event_type_t event_type);
@@ -3011,7 +3018,7 @@ static void __perf_event_read(void *info)
 
 static inline u64 perf_event_count(struct perf_event *event)
 {
-	return local64_read(&event->count) + atomic64_read(&event->child_count);
+	return local64_read(&event->count) + atomic64_read_unchecked(&event->child_count);
 }
 
 static u64 perf_event_read(struct perf_event *event)
@@ -3376,9 +3383,9 @@ u64 perf_event_read_value(struct perf_event *event, u64 *enabled, u64 *running)
 	mutex_lock(&event->child_mutex);
 	total += perf_event_read(event);
 	*enabled += event->total_time_enabled +
-			atomic64_read(&event->child_total_time_enabled);
+			atomic64_read_unchecked(&event->child_total_time_enabled);
 	*running += event->total_time_running +
-			atomic64_read(&event->child_total_time_running);
+			atomic64_read_unchecked(&event->child_total_time_running);
 
 	list_for_each_entry(child, &event->child_list, child_list) {
 		total += perf_event_read(child);
@@ -3562,21 +3569,28 @@ static void perf_event_for_each(struct perf_event *event,
 	mutex_unlock(&ctx->mutex);
 }
 
-struct period_event {
-	struct perf_event *event;
-	u64 value;
-};
-
-static int __perf_event_period(void *info)
+static int perf_event_period(struct perf_event *event, u64 __user *arg)
 {
-	struct period_event *pe = info;
-	struct perf_event *event = pe->event;
 	struct perf_event_context *ctx = event->ctx;
-	u64 value = pe->value;
-	bool active;
+	int ret = 0, active;
+	u64 value;
 
-	raw_spin_lock(&ctx->lock);
+	if (!is_sampling_event(event))
+		return -EINVAL;
+
+	if (copy_from_user(&value, arg, sizeof(value)))
+		return -EFAULT;
+
+	if (!value)
+		return -EINVAL;
+
+	raw_spin_lock_irq(&ctx->lock);
 	if (event->attr.freq) {
+		if (value > sysctl_perf_event_sample_rate) {
+			ret = -EINVAL;
+			goto unlock;
+		}
+
 		event->attr.sample_freq = value;
 	} else {
 		event->attr.sample_period = value;
@@ -3595,53 +3609,11 @@ static int __perf_event_period(void *info)
 		event->pmu->start(event, PERF_EF_RELOAD);
 		perf_pmu_enable(ctx->pmu);
 	}
-	raw_spin_unlock(&ctx->lock);
 
-	return 0;
-}
-
-static int perf_event_period(struct perf_event *event, u64 __user *arg)
-{
-	struct period_event pe = { .event = event, };
-	struct perf_event_context *ctx = event->ctx;
-	struct task_struct *task;
-	u64 value;
-
-	if (!is_sampling_event(event))
-		return -EINVAL;
-
-	if (copy_from_user(&value, arg, sizeof(value)))
-		return -EFAULT;
-
-	if (!value)
-		return -EINVAL;
-
-	if (event->attr.freq && value > sysctl_perf_event_sample_rate)
-		return -EINVAL;
-
-	task = ctx->task;
-	pe.value = value;
-
-	if (!task) {
-		cpu_function_call(event->cpu, __perf_event_period, &pe);
-		return 0;
-	}
-
-retry:
-	if (!task_function_call(task, __perf_event_period, &pe))
-		return 0;
-
-	raw_spin_lock_irq(&ctx->lock);
-	if (ctx->is_active) {
-		raw_spin_unlock_irq(&ctx->lock);
-		task = ctx->task;
-		goto retry;
-	}
-
-	__perf_event_period(&pe);
+unlock:
 	raw_spin_unlock_irq(&ctx->lock);
 
-	return 0;
+	return ret;
 }
 
 static const struct file_operations perf_fops;
@@ -3862,10 +3834,10 @@ void perf_event_update_userpage(struct perf_event *event)
 		userpg->offset -= local64_read(&event->hw.prev_count);
 
 	userpg->time_enabled = enabled +
-			atomic64_read(&event->child_total_time_enabled);
+			atomic64_read_unchecked(&event->child_total_time_enabled);
 
 	userpg->time_running = running +
-			atomic64_read(&event->child_total_time_running);
+			atomic64_read_unchecked(&event->child_total_time_running);
 
 	arch_perf_update_userpage(userpg, now);
 
@@ -4253,20 +4225,12 @@ static const struct file_operations perf_fops = {
  * to user-space before waking everybody up.
  */
 
-static inline struct fasync_struct **perf_event_fasync(struct perf_event *event)
-{
-	/* only the parent has fasync state */
-	if (event->parent)
-		event = event->parent;
-	return &event->fasync;
-}
-
 void perf_event_wakeup(struct perf_event *event)
 {
 	ring_buffer_wakeup(event);
 
 	if (event->pending_kill) {
-		kill_fasync(perf_event_fasync(event), SIGIO, event->pending_kill);
+		kill_fasync(&event->fasync, SIGIO, event->pending_kill);
 		event->pending_kill = 0;
 	}
 }
@@ -4434,7 +4398,7 @@ perf_output_sample_ustack(struct perf_output_handle *handle, u64 dump_size,
 
 		/* Data. */
 		sp = perf_user_stack_pointer(regs);
-		rem = __output_copy_user(handle, (void *) sp, dump_size);
+		rem = __output_copy_user(handle, (void __user *) sp, dump_size);
 		dyn_size = dump_size - rem;
 
 		perf_output_skip(handle, rem);
@@ -4525,11 +4489,11 @@ static void perf_output_read_one(struct perf_output_handle *handle,
 	values[n++] = perf_event_count(event);
 	if (read_format & PERF_FORMAT_TOTAL_TIME_ENABLED) {
 		values[n++] = enabled +
-			atomic64_read(&event->child_total_time_enabled);
+			atomic64_read_unchecked(&event->child_total_time_enabled);
 	}
 	if (read_format & PERF_FORMAT_TOTAL_TIME_RUNNING) {
 		values[n++] = running +
-			atomic64_read(&event->child_total_time_running);
+			atomic64_read_unchecked(&event->child_total_time_running);
 	}
 	if (read_format & PERF_FORMAT_ID)
 		values[n++] = primary_event_id(event);
@@ -5475,7 +5439,7 @@ static int __perf_event_overflow(struct perf_event *event,
 	else
 		perf_event_output(event, data, regs);
 
-	if (*perf_event_fasync(event) && event->pending_kill) {
+	if (event->fasync && event->pending_kill) {
 		event->pending_wakeup = 1;
 		irq_work_queue(&event->pending);
 	}
@@ -6808,7 +6772,7 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 	event->parent		= parent_event;
 
 	event->ns		= get_pid_ns(task_active_pid_ns(current));
-	event->id		= atomic64_inc_return(&perf_event_id);
+	event->id		= atomic64_inc_return_unchecked(&perf_event_id);
 
 	event->state		= PERF_EVENT_STATE_INACTIVE;
 
@@ -7107,6 +7071,11 @@ SYSCALL_DEFINE5(perf_event_open,
 	/* for future expandability... */
 	if (flags & ~PERF_FLAG_ALL)
 		return -EINVAL;
+
+#ifdef CONFIG_GRKERNSEC_PERF_HARDEN
+	if (perf_paranoid_any() && !capable(CAP_SYS_ADMIN))
+		return -EACCES;
+#endif
 
 	err = perf_copy_attr(attr_uptr, &attr);
 	if (err)
@@ -7446,10 +7415,10 @@ static void sync_child_event(struct perf_event *child_event,
 	/*
 	 * Add back the child's count to the parent's count:
 	 */
-	atomic64_add(child_val, &parent_event->child_count);
-	atomic64_add(child_event->total_time_enabled,
+	atomic64_add_unchecked(child_val, &parent_event->child_count);
+	atomic64_add_unchecked(child_event->total_time_enabled,
 		     &parent_event->child_total_time_enabled);
-	atomic64_add(child_event->total_time_running,
+	atomic64_add_unchecked(child_event->total_time_running,
 		     &parent_event->child_total_time_running);
 
 	/*

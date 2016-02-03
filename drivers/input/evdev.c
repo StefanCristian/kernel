@@ -240,14 +240,19 @@ static int evdev_flush(struct file *file, fl_owner_t id)
 {
 	struct evdev_client *client = file->private_data;
 	struct evdev *evdev = client->evdev;
+	int retval;
 
-	mutex_lock(&evdev->mutex);
+	retval = mutex_lock_interruptible(&evdev->mutex);
+	if (retval)
+		return retval;
 
-	if (evdev->exist && !client->revoked)
-		input_flush_device(&evdev->handle, file);
+	if (!evdev->exist || client->revoked)
+		retval = -ENODEV;
+	else
+		retval = input_flush_device(&evdev->handle, file);
 
 	mutex_unlock(&evdev->mutex);
-	return 0;
+	return retval;
 }
 
 static void evdev_free(struct device *dev)
@@ -417,7 +422,7 @@ static int evdev_open(struct inode *inode, struct file *file)
 
  err_free_client:
 	evdev_detach_client(evdev, client);
-	kfree(client);
+	kvfree(client);
 	return error;
 }
 

@@ -1,5 +1,18 @@
 /*
- * Copyright (C) 2005-2014 Junjiro R. Okajima
+ * Copyright (C) 2005-2015 Junjiro R. Okajima
+ *
+ * This program, aufs is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 /*
@@ -60,8 +73,14 @@ extern const struct address_space_operations aufs_aop;
 unsigned int au_file_roflags(unsigned int flags);
 struct file *au_h_open(struct dentry *dentry, aufs_bindex_t bindex, int flags,
 		       struct file *file, int force_wr);
-int au_do_open(struct file *file, int (*open)(struct file *file, int flags),
-	       struct au_fidir *fidir);
+struct au_do_open_args {
+	int		no_lock;
+	int		(*open)(struct file *file, int flags,
+				struct file *h_file);
+	struct au_fidir	*fidir;
+	struct file	*h_file;
+};
+int au_do_open(struct file *file, struct au_do_open_args *args);
 int au_reopen_nondir(struct file *file);
 struct au_pin;
 int au_ready_to_write(struct file *file, loff_t len, struct au_pin *pin);
@@ -90,8 +109,9 @@ AuStubVoid(au_h_open_post, struct dentry *dentry, aufs_bindex_t bindex,
 
 /* f_op.c */
 extern const struct file_operations aufs_file_fop;
-int au_do_open_nondir(struct file *file, int flags);
+int au_do_open_nondir(struct file *file, int flags, struct file *h_file);
 int aufs_release_nondir(struct inode *inode __maybe_unused, struct file *file);
+struct file *au_read_pre(struct file *file, int keep_fi);
 
 /* finfo.c */
 void au_hfput(struct au_hfile *hf, struct file *file);

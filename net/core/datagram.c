@@ -159,35 +159,6 @@ done:
 	return skb;
 }
 
-static int skb_set_peeked(struct sk_buff *skb)
-{
-	struct sk_buff *nskb;
-
-	if (skb->peeked)
-		return 0;
-
-	/* We have to unshare an skb before modifying it. */
-	if (!skb_shared(skb))
-		goto done;
-
-	nskb = skb_clone(skb, GFP_ATOMIC);
-	if (!nskb)
-		return -ENOMEM;
-
-	skb->prev->next = nskb;
-	skb->next->prev = nskb;
-	nskb->prev = skb->prev;
-	nskb->next = skb->next;
-
-	consume_skb(skb);
-	skb = nskb;
-
-done:
-	skb->peeked = 1;
-
-	return 0;
-}
-
 /**
  *	__skb_recv_datagram - Receive a datagram skbuff
  *	@sk: socket
@@ -366,7 +337,7 @@ int skb_kill_datagram(struct sock *sk, struct sk_buff *skb, unsigned int flags)
 	}
 
 	kfree_skb(skb);
-	atomic_inc(&sk->sk_drops);
+	atomic_inc_unchecked(&sk->sk_drops);
 	sk_mem_reclaim_partial(sk);
 
 	return err;
@@ -807,8 +778,7 @@ __sum16 __skb_checksum_complete_head(struct sk_buff *skb, int len)
 	if (likely(!sum)) {
 		if (unlikely(skb->ip_summed == CHECKSUM_COMPLETE))
 			netdev_rx_csum_fault(skb->dev);
-		if (!skb_shared(skb))
-			skb->ip_summed = CHECKSUM_UNNECESSARY;
+		skb->ip_summed = CHECKSUM_UNNECESSARY;
 	}
 	return sum;
 }

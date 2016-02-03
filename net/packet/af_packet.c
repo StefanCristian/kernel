@@ -1832,7 +1832,7 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,
 
 	spin_lock(&sk->sk_receive_queue.lock);
 	po->stats.stats1.tp_packets++;
-	skb->dropcount = atomic_read(&sk->sk_drops);
+	skb->dropcount = atomic_read_unchecked(&sk->sk_drops);
 	__skb_queue_tail(&sk->sk_receive_queue, skb);
 	spin_unlock(&sk->sk_receive_queue.lock);
 	sk->sk_data_ready(sk, skb->len);
@@ -1841,7 +1841,7 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,
 drop_n_acct:
 	spin_lock(&sk->sk_receive_queue.lock);
 	po->stats.stats1.tp_drops++;
-	atomic_inc(&sk->sk_drops);
+	atomic_inc_unchecked(&sk->sk_drops);
 	spin_unlock(&sk->sk_receive_queue.lock);
 
 drop_n_restore:
@@ -2645,7 +2645,7 @@ static int packet_release(struct socket *sock)
 static int packet_do_bind(struct sock *sk, struct net_device *dev, __be16 proto)
 {
 	struct packet_sock *po = pkt_sk(sk);
-	struct net_device *dev_curr;
+	const struct net_device *dev_curr;
 	__be16 proto_curr;
 	bool need_rehook;
 
@@ -2669,13 +2669,15 @@ static int packet_do_bind(struct sock *sk, struct net_device *dev, __be16 proto)
 
 		po->num = proto;
 		po->prot_hook.type = proto;
+
+		if (po->prot_hook.dev)
+			dev_put(po->prot_hook.dev);
+
 		po->prot_hook.dev = dev;
 
 		po->ifindex = dev ? dev->ifindex : 0;
 		packet_cached_dev_assign(po, dev);
 	}
-	if (dev_curr)
-		dev_put(dev_curr);
 
 	if (proto == 0 || !need_rehook)
 		goto out_unlock;
@@ -3446,7 +3448,7 @@ static int packet_getsockopt(struct socket *sock, int level, int optname,
 	case PACKET_HDRLEN:
 		if (len > sizeof(int))
 			len = sizeof(int);
-		if (copy_from_user(&val, optval, len))
+		if (len > sizeof(val) || copy_from_user(&val, optval, len))
 			return -EFAULT;
 		switch (val) {
 		case TPACKET_V1:
@@ -3492,7 +3494,7 @@ static int packet_getsockopt(struct socket *sock, int level, int optname,
 		len = lv;
 	if (put_user(len, optlen))
 		return -EFAULT;
-	if (copy_to_user(optval, data, len))
+	if (len > sizeof(st) || copy_to_user(optval, data, len))
 		return -EFAULT;
 	return 0;
 }

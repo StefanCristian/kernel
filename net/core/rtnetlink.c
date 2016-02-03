@@ -58,7 +58,7 @@ struct rtnl_link {
 	rtnl_doit_func		doit;
 	rtnl_dumpit_func	dumpit;
 	rtnl_calcit_func 	calcit;
-};
+} __no_const;
 
 static DEFINE_MUTEX(rtnl_mutex);
 
@@ -299,10 +299,13 @@ int __rtnl_link_register(struct rtnl_link_ops *ops)
 	if (rtnl_link_ops_get(ops->kind))
 		return -EEXIST;
 
-	if (!ops->dellink)
-		ops->dellink = unregister_netdevice_queue;
+	if (!ops->dellink) {
+		pax_open_kernel();
+		*(void **)&ops->dellink = unregister_netdevice_queue;
+		pax_close_kernel();
+	}
 
-	list_add_tail(&ops->list, &link_ops);
+	pax_list_add_tail((struct list_head *)&ops->list, &link_ops);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(__rtnl_link_register);
@@ -349,7 +352,7 @@ void __rtnl_link_unregister(struct rtnl_link_ops *ops)
 	for_each_net(net) {
 		__rtnl_kill_links(net, ops);
 	}
-	list_del(&ops->list);
+	pax_list_del((struct list_head *)&ops->list);
 }
 EXPORT_SYMBOL_GPL(__rtnl_link_unregister);
 
@@ -1259,6 +1262,10 @@ static const struct nla_policy ifla_info_policy[IFLA_INFO_MAX+1] = {
 	[IFLA_INFO_SLAVE_DATA]	= { .type = NLA_NESTED },
 };
 
+static const struct nla_policy ifla_vfinfo_policy[IFLA_VF_INFO_MAX+1] = {
+	[IFLA_VF_INFO]		= { .type = NLA_NESTED },
+};
+
 static const struct nla_policy ifla_vf_policy[IFLA_VF_MAX+1] = {
 	[IFLA_VF_MAC]		= { .len = sizeof(struct ifla_vf_mac) },
 	[IFLA_VF_VLAN]		= { .len = sizeof(struct ifla_vf_vlan) },
@@ -1332,66 +1339,67 @@ static int validate_linkmsg(struct net_device *dev, struct nlattr *tb[])
 	return 0;
 }
 
-static int do_setvfinfo(struct net_device *dev, struct nlattr **tb)
+static int do_setvfinfo(struct net_device *dev, struct nlattr *attr)
 {
+	int rem, err = -EINVAL;
+	struct nlattr *vf;
 	const struct net_device_ops *ops = dev->netdev_ops;
-	int err = -EINVAL;
 
-	if (tb[IFLA_VF_MAC]) {
-		struct ifla_vf_mac *ivm = nla_data(tb[IFLA_VF_MAC]);
-
-		err = -EOPNOTSUPP;
-		if (ops->ndo_set_vf_mac)
-			err = ops->ndo_set_vf_mac(dev, ivm->vf,
-						  ivm->mac);
-		if (err < 0)
-			return err;
+	nla_for_each_nested(vf, attr, rem) {
+		switch (nla_type(vf)) {
+		case IFLA_VF_MAC: {
+			struct ifla_vf_mac *ivm;
+			ivm = nla_data(vf);
+			err = -EOPNOTSUPP;
+			if (ops->ndo_set_vf_mac)
+				err = ops->ndo_set_vf_mac(dev, ivm->vf,
+							  ivm->mac);
+			break;
+		}
+		case IFLA_VF_VLAN: {
+			struct ifla_vf_vlan *ivv;
+			ivv = nla_data(vf);
+			err = -EOPNOTSUPP;
+			if (ops->ndo_set_vf_vlan)
+				err = ops->ndo_set_vf_vlan(dev, ivv->vf,
+							   ivv->vlan,
+							   ivv->qos);
+			break;
+		}
+		case IFLA_VF_TX_RATE: {
+			struct ifla_vf_tx_rate *ivt;
+			ivt = nla_data(vf);
+			err = -EOPNOTSUPP;
+			if (ops->ndo_set_vf_tx_rate)
+				err = ops->ndo_set_vf_tx_rate(dev, ivt->vf,
+							      ivt->rate);
+			break;
+		}
+		case IFLA_VF_SPOOFCHK: {
+			struct ifla_vf_spoofchk *ivs;
+			ivs = nla_data(vf);
+			err = -EOPNOTSUPP;
+			if (ops->ndo_set_vf_spoofchk)
+				err = ops->ndo_set_vf_spoofchk(dev, ivs->vf,
+							       ivs->setting);
+			break;
+		}
+		case IFLA_VF_LINK_STATE: {
+			struct ifla_vf_link_state *ivl;
+			ivl = nla_data(vf);
+			err = -EOPNOTSUPP;
+			if (ops->ndo_set_vf_link_state)
+				err = ops->ndo_set_vf_link_state(dev, ivl->vf,
+								 ivl->link_state);
+			break;
+		}
+		default:
+			err = -EINVAL;
+			break;
+		}
+		if (err)
+			break;
 	}
-
-	if (tb[IFLA_VF_VLAN]) {
-		struct ifla_vf_vlan *ivv = nla_data(tb[IFLA_VF_VLAN]);
-
-		err = -EOPNOTSUPP;
-		if (ops->ndo_set_vf_vlan)
-			err = ops->ndo_set_vf_vlan(dev, ivv->vf, ivv->vlan,
-						   ivv->qos);
-		if (err < 0)
-			return err;
-	}
-
-	if (tb[IFLA_VF_TX_RATE]) {
-		struct ifla_vf_tx_rate *ivt = nla_data(tb[IFLA_VF_TX_RATE]);
-
-		err = -EOPNOTSUPP;
-		if (ops->ndo_set_vf_tx_rate)
-			err = ops->ndo_set_vf_tx_rate(dev, ivt->vf,
-						      ivt->rate);
-		if (err < 0)
-			return err;
-	}
-
-	if (tb[IFLA_VF_SPOOFCHK]) {
-		struct ifla_vf_spoofchk *ivs = nla_data(tb[IFLA_VF_SPOOFCHK]);
-
-		err = -EOPNOTSUPP;
-		if (ops->ndo_set_vf_spoofchk)
-			err = ops->ndo_set_vf_spoofchk(dev, ivs->vf,
-						       ivs->setting);
-		if (err < 0)
-			return err;
-	}
-
-	if (tb[IFLA_VF_LINK_STATE]) {
-		struct ifla_vf_link_state *ivl = nla_data(tb[IFLA_VF_LINK_STATE]);
-
-		err = -EOPNOTSUPP;
-		if (ops->ndo_set_vf_link_state)
-			err = ops->ndo_set_vf_link_state(dev, ivl->vf,
-							 ivl->link_state);
-		if (err < 0)
-			return err;
-	}
-
 	return err;
 }
 
@@ -1574,21 +1582,14 @@ static int do_setlink(const struct sk_buff *skb,
 	}
 
 	if (tb[IFLA_VFINFO_LIST]) {
-		struct nlattr *vfinfo[IFLA_VF_MAX + 1];
 		struct nlattr *attr;
 		int rem;
-
 		nla_for_each_nested(attr, tb[IFLA_VFINFO_LIST], rem) {
-			if (nla_type(attr) != IFLA_VF_INFO ||
-			    nla_len(attr) < NLA_HDRLEN) {
+			if (nla_type(attr) != IFLA_VF_INFO) {
 				err = -EINVAL;
 				goto errout;
 			}
-			err = nla_parse_nested(vfinfo, IFLA_VF_MAX, attr,
-					       ifla_vf_policy);
-			if (err < 0)
-				goto errout;
-			err = do_setvfinfo(dev, vfinfo);
+			err = do_setvfinfo(dev, attr);
 			if (err < 0)
 				goto errout;
 			modified = 1;
@@ -1607,10 +1608,13 @@ static int do_setlink(const struct sk_buff *skb,
 			goto errout;
 
 		nla_for_each_nested(attr, tb[IFLA_VF_PORTS], rem) {
-			if (nla_type(attr) != IFLA_VF_PORT)
-				continue;
-			err = nla_parse_nested(port, IFLA_PORT_MAX,
-				attr, ifla_port_policy);
+			if (nla_type(attr) != IFLA_VF_PORT ||
+			    nla_len(attr) < NLA_HDRLEN) {
+				err = -EINVAL;
+				goto errout;
+			}
+			err = nla_parse_nested(port, IFLA_PORT_MAX, attr,
+					       ifla_port_policy);
 			if (err < 0)
 				goto errout;
 			if (!port[IFLA_PORT_VF]) {
@@ -2007,6 +2011,10 @@ replay:
 		dest_net = rtnl_link_get_net(net, tb);
 		if (IS_ERR(dest_net))
 			return PTR_ERR(dest_net);
+
+		err = -EPERM;
+		if (!netlink_ns_capable(skb, dest_net->user_ns, CAP_NET_ADMIN))
+			goto out;
 
 		dev = rtnl_create_link(dest_net, ifname, ops, tb);
 		if (IS_ERR(dev)) {
@@ -2695,6 +2703,9 @@ static int rtnl_bridge_setlink(struct sk_buff *skb, struct nlmsghdr *nlh)
 	if (br_spec) {
 		nla_for_each_nested(attr, br_spec, rem) {
 			if (nla_type(attr) == IFLA_BRIDGE_FLAGS) {
+				if (nla_len(attr) < sizeof(flags))
+					return -EINVAL;
+
 				have_flags = true;
 				flags = nla_get_u16(attr);
 				break;
@@ -2765,6 +2776,9 @@ static int rtnl_bridge_dellink(struct sk_buff *skb, struct nlmsghdr *nlh)
 	if (br_spec) {
 		nla_for_each_nested(attr, br_spec, rem) {
 			if (nla_type(attr) == IFLA_BRIDGE_FLAGS) {
+				if (nla_len(attr) < sizeof(flags))
+					return -EINVAL;
+
 				have_flags = true;
 				flags = nla_get_u16(attr);
 				break;

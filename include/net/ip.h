@@ -154,7 +154,6 @@ static inline __u8 get_rtconn_flags(struct ipcm_cookie* ipc, struct sock* sk)
 }
 
 /* datagram.c */
-int __ip4_datagram_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len);
 int ip4_datagram_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len);
 
 void ip4_datagram_release_cb(struct sock *sk);
@@ -216,7 +215,7 @@ static inline void snmp_mib_free(void __percpu *ptr[SNMP_ARRAY_SZ])
 
 void inet_get_local_port_range(struct net *net, int *low, int *high);
 
-extern unsigned long *sysctl_local_reserved_ports;
+extern unsigned long sysctl_local_reserved_ports[65536 / 8 / sizeof(unsigned long)];
 static inline int inet_is_reserved_local_port(int port)
 {
 	return test_bit(port, sysctl_local_reserved_ports);
@@ -299,7 +298,7 @@ static inline unsigned int ip_skb_dst_mtu(const struct sk_buff *skb)
 	}
 }
 
-u32 ip_idents_reserve(u32 hash, int segs);
+u32 ip_idents_reserve(u32 hash, int segs) __intentional_overflow(-1);
 void __ip_select_ident(struct iphdr *iph, int segs);
 
 static inline void ip_select_ident_segs(struct sk_buff *skb, struct sock *sk, int segs)

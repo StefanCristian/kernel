@@ -399,16 +399,6 @@ int register_mem_sect_under_node(struct memory_block *mem_blk, int nid)
 	for (pfn = sect_start_pfn; pfn <= sect_end_pfn; pfn++) {
 		int page_nid;
 
-		/*
-		 * memory block could have several absent sections from start.
-		 * skip pfn range from absent section
-		 */
-		if (!pfn_present(pfn)) {
-			pfn = round_down(pfn + PAGES_PER_SECTION,
-					 PAGES_PER_SECTION) - 1;
-			continue;
-		}
-
 		page_nid = get_nid_for_pfn(pfn);
 		if (page_nid < 0)
 			continue;
@@ -630,7 +620,7 @@ static ssize_t print_nodes_state(enum node_states state, char *buf)
 struct node_attr {
 	struct device_attribute attr;
 	enum node_states state;
-};
+} __do_const;
 
 static ssize_t show_node_state(struct device *dev,
 			       struct device_attribute *attr, char *buf)

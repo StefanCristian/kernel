@@ -337,13 +337,8 @@ static inline int sem_lock(struct sem_array *sma, struct sembuf *sops,
 
 		/* Then check that the global lock is free */
 		if (!spin_is_locked(&sma->sem_perm.lock)) {
-			/*
-			 * We need a memory barrier with acquire semantics,
-			 * otherwise we can race with another thread that does:
-			 *	complex_count++;
-			 *	spin_unlock(sem_perm.lock);
-			 */
-			ipc_smp_acquire__after_spin_is_unlocked();
+			/* spin_is_locked() is not a memory barrier */
+			smp_mb();
 
 			/* Now repeat the test of complex_count:
 			 * It can't change anymore until we drop sem->lock.
@@ -577,20 +572,21 @@ static inline int sem_more_checks(struct kern_ipc_perm *ipcp,
 	return 0;
 }
 
+static struct ipc_ops sem_ops = {
+	.getnew		= newary,
+	.associate	= sem_security,
+	.more_checks	= sem_more_checks
+};
+
 SYSCALL_DEFINE3(semget, key_t, key, int, nsems, int, semflg)
 {
 	struct ipc_namespace *ns;
-	struct ipc_ops sem_ops;
 	struct ipc_params sem_params;
 
 	ns = current->nsproxy->ipc_ns;
 
 	if (nsems < 0 || nsems > ns->sc_semmsl)
 		return -EINVAL;
-
-	sem_ops.getnew = newary;
-	sem_ops.associate = sem_security;
-	sem_ops.more_checks = sem_more_checks;
 
 	sem_params.key = key;
 	sem_params.flg = semflg;
@@ -1776,7 +1772,7 @@ static int get_queue_result(struct sem_queue *q)
 }
 
 SYSCALL_DEFINE4(semtimedop, int, semid, struct sembuf __user *, tsops,
-		unsigned, nsops, const struct timespec __user *, timeout)
+		long, nsops, const struct timespec __user *, timeout)
 {
 	int error = -EINVAL;
 	struct sem_array *sma;
@@ -2012,7 +2008,7 @@ out_free:
 }
 
 SYSCALL_DEFINE3(semop, int, semid, struct sembuf __user *, tsops,
-		unsigned, nsops)
+		long, nsops)
 {
 	return sys_semtimedop(semid, tsops, nsops, NULL);
 }
@@ -2071,28 +2067,17 @@ void exit_sem(struct task_struct *tsk)
 		rcu_read_lock();
 		un = list_entry_rcu(ulp->list_proc.next,
 				    struct sem_undo, list_proc);
-		if (&un->list_proc == &ulp->list_proc) {
-			/*
-			 * We must wait for freeary() before freeing this ulp,
-			 * in case we raced with last sem_undo. There is a small
-			 * possibility where we exit while freeary() didn't
-			 * finish unlocking sem_undo_list.
-			 */
-			spin_unlock_wait(&ulp->lock);
+		if (&un->list_proc == &ulp->list_proc)
+			semid = -1;
+		 else
+			semid = un->semid;
+
+		if (semid == -1) {
 			rcu_read_unlock();
 			break;
 		}
-		spin_lock(&ulp->lock);
-		semid = un->semid;
-		spin_unlock(&ulp->lock);
 
-		/* exit_sem raced with IPC_RMID, nothing to do */
-		if (semid == -1) {
-			rcu_read_unlock();
-			continue;
-		}
-
-		sma = sem_obtain_object_check(tsk->nsproxy->ipc_ns, semid);
+		sma = sem_obtain_object_check(tsk->nsproxy->ipc_ns, un->semid);
 		/* exit_sem raced with IPC_RMID, nothing to do */
 		if (IS_ERR(sma)) {
 			rcu_read_unlock();

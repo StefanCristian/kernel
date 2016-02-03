@@ -1,5 +1,18 @@
 /*
- * Copyright (C) 2005-2014 Junjiro R. Okajima
+ * Copyright (C) 2005-2015 Junjiro R. Okajima
+ *
+ * This program, aufs is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 /*
@@ -95,6 +108,8 @@ int au_si_alloc(struct super_block *sb)
 	sbinfo->si_xino_brid = -1;
 	/* leave si_xib_last_pindex and si_xib_next_bit */
 
+	au_sphl_init(&sbinfo->si_aopen);
+
 	sbinfo->si_rdcache = msecs_to_jiffies(AUFS_RDCACHE_DEF * MSEC_PER_SEC);
 	sbinfo->si_rdblk = AUFS_RDBLK_DEF;
 	sbinfo->si_rdhash = AUFS_RDHASH_DEF;
@@ -111,7 +126,6 @@ int au_si_alloc(struct super_block *sb)
 	sbinfo->si_sb = sb;
 	sb->s_fs_info = sbinfo;
 	si_pid_set(sb);
-	au_debug_sbinfo_init(sbinfo);
 	return 0; /* success */
 
 out_br:

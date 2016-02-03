@@ -1,5 +1,18 @@
 /*
- * Copyright (C) 2005-2014 Junjiro R. Okajima
+ * Copyright (C) 2005-2015 Junjiro R. Okajima
+ *
+ * This program, aufs is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 /*
@@ -142,9 +155,8 @@ extern struct inode_operations aufs_iop, aufs_symlink_iop, aufs_dir_iop;
 
 /* au_wr_dir flags */
 #define AuWrDir_ADD_ENTRY	1
-#define AuWrDir_TMP_WHENTRY	(1 << 1)
-#define AuWrDir_ISDIR		(1 << 2)
-#define AuWrDir_TMPFILE		(1 << 3)
+#define AuWrDir_ISDIR		(1 << 1)
+#define AuWrDir_TMPFILE		(1 << 2)
 #define au_ftest_wrdir(flags, name)	((flags) & AuWrDir_##name)
 #define au_fset_wrdir(flags, name) \
 	do { (flags) |= AuWrDir_##name; } while (0)
@@ -198,6 +210,9 @@ int aufs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 int aufs_symlink(struct inode *dir, struct dentry *dentry, const char *symname);
 int aufs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 		bool want_excl);
+struct vfsub_aopen_args;
+int au_aopen_or_create(struct inode *dir, struct dentry *dentry,
+		       struct vfsub_aopen_args *args);
 int aufs_tmpfile(struct inode *dir, struct dentry *dentry, umode_t mode);
 int aufs_link(struct dentry *src_dentry, struct inode *dir,
 	      struct dentry *dentry);
@@ -250,6 +265,7 @@ int au_ii_realloc(struct au_iinfo *iinfo, int nbr);
 #ifdef CONFIG_PROC_FS
 /* plink.c */
 int au_plink_maint(struct super_block *sb, int flags);
+struct au_sbinfo;
 void au_plink_maint_leave(struct au_sbinfo *sbinfo);
 int au_plink_maint_enter(struct super_block *sb);
 #ifdef CONFIG_AUFS_DEBUG
@@ -281,7 +297,8 @@ AuStubVoid(au_plink_half_refresh, struct super_block *sb, aufs_bindex_t br_id);
 
 #ifdef CONFIG_AUFS_XATTR
 /* xattr.c */
-int au_cpup_xattr(struct dentry *h_dst, struct dentry *h_src, int ignore_flags);
+int au_cpup_xattr(struct dentry *h_dst, struct dentry *h_src, int ignore_flags,
+		  unsigned int verbose);
 ssize_t aufs_listxattr(struct dentry *dentry, char *list, size_t size);
 ssize_t aufs_getxattr(struct dentry *dentry, const char *name, void *value,
 		      size_t size);
@@ -292,10 +309,42 @@ int aufs_removexattr(struct dentry *dentry, const char *name);
 /* void au_xattr_init(struct super_block *sb); */
 #else
 AuStubInt0(au_cpup_xattr, struct dentry *h_dst, struct dentry *h_src,
-	   int ignore_flags);
+	   int ignore_flags, unsigned int verbose);
 /* AuStubVoid(au_xattr_init, struct super_block *sb); */
 #endif
 
+#ifdef CONFIG_FS_POSIX_ACL
+struct posix_acl *aufs_get_acl(struct inode *inode, int type);
+int aufs_set_acl(struct inode *inode, struct posix_acl *acl, int type);
+#endif
+
+#if IS_ENABLED(CONFIG_AUFS_XATTR) || IS_ENABLED(CONFIG_FS_POSIX_ACL)
+enum {
+	AU_XATTR_SET,
+	AU_XATTR_REMOVE,
+	AU_ACL_SET
+};
+
+struct au_srxattr {
+	int type;
+	union {
+		struct {
+			const char	*name;
+			const void	*value;
+			size_t		size;
+			int		flags;
+		} set;
+		struct {
+			const char	*name;
+		} remove;
+		struct {
+			struct posix_acl *acl;
+			int		type;
+		} acl_set;
+	} u;
+};
+ssize_t au_srxattr(struct dentry *dentry, struct au_srxattr *arg);
+#endif
 
 /* ---------------------------------------------------------------------- */
 
@@ -510,6 +559,7 @@ static inline void au_pin_set_parent_lflag(struct au_pin *pin,
 	}
 }
 
+#if 0 /* reserved */
 static inline void au_pin_set_parent(struct au_pin *pin, struct dentry *parent)
 {
 	if (pin) {
@@ -517,6 +567,7 @@ static inline void au_pin_set_parent(struct au_pin *pin, struct dentry *parent)
 		pin->parent = dget(parent);
 	}
 }
+#endif
 
 /* ---------------------------------------------------------------------- */
 

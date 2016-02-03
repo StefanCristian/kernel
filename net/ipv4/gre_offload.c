@@ -56,12 +56,12 @@ static struct sk_buff *gre_gso_segment(struct sk_buff *skb,
 
 	csum = !!(greh->flags & GRE_CSUM);
 
-	if (unlikely(!pskb_may_pull(skb, ghl)))
-		goto out;
-
 	/* setup inner skb. */
 	skb->protocol = greh->protocol;
 	skb->encapsulation = 0;
+
+	if (unlikely(!pskb_may_pull(skb, ghl)))
+		goto out;
 
 	__skb_pull(skb, ghl);
 	skb_reset_mac_header(skb);
@@ -69,7 +69,7 @@ static struct sk_buff *gre_gso_segment(struct sk_buff *skb,
 	skb->mac_len = skb_inner_network_offset(skb);
 
 	/* segment inner packet. */
-	enc_features = skb->dev->hw_enc_features & features;
+	enc_features = skb->dev->hw_enc_features & netif_skb_features(skb);
 	segs = skb_mac_gso_segment(skb, enc_features);
 	if (!segs || IS_ERR(segs)) {
 		skb_gso_error_unwind(skb, protocol, ghl, mac_offset, mac_len);

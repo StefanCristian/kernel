@@ -1,5 +1,18 @@
 /*
- * Copyright (C) 2005-2014 Junjiro R. Okajima
+ * Copyright (C) 2005-2015 Junjiro R. Okajima
+ *
+ * This program, aufs is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 /*
@@ -7,11 +20,9 @@
  */
 
 #include <linux/mm.h>
-#include <linux/module.h>
 #include <linux/seq_file.h>
 #include <linux/statfs.h>
 #include <linux/vmalloc.h>
-#include <linux/writeback.h>
 #include "aufs.h"
 
 /*
@@ -93,7 +104,7 @@ static int au_show_brs(struct seq_file *seq, struct super_block *sb)
 		path.mnt = au_br_mnt(br);
 		path.dentry = hdp[bindex].hd_dentry;
 		err = au_seq_path(seq, &path);
-		if (err > 0) {
+		if (!err) {
 			au_optstr_br_perm(&perm, br->br_perm);
 			err = seq_printf(seq, "=%s", perm.a);
 			if (err == -1)
@@ -812,7 +823,10 @@ static const struct super_operations aufs_sop = {
 	.statfs		= aufs_statfs,
 	.put_super	= aufs_put_super,
 	.sync_fs	= aufs_sync_fs,
-	.remount_fs	= aufs_remount_fs
+	.remount_fs	= aufs_remount_fs,
+#ifdef CONFIG_AUFS_BDEV_LOOP
+	.real_loop	= aufs_real_loop
+#endif
 };
 
 /* ---------------------------------------------------------------------- */

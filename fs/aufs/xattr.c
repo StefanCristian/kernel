@@ -1,5 +1,18 @@
 /*
- * Copyright (C) 2014 Junjiro R. Okajima
+ * Copyright (C) 2014-2015 Junjiro R. Okajima
+ *
+ * This program, aufs is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 /*
@@ -49,7 +62,8 @@ out:
 static const int au_xattr_out_of_list = AuBrAttr_ICEX_OTH << 1;
 
 static int au_do_cpup_xattr(struct dentry *h_dst, struct dentry *h_src,
-			    char *name, char **buf, unsigned int ignore_flags)
+			    char *name, char **buf, unsigned int ignore_flags,
+			    unsigned int verbose)
 {
 	int err;
 	ssize_t ssz;
@@ -58,11 +72,17 @@ static int au_do_cpup_xattr(struct dentry *h_dst, struct dentry *h_src,
 	ssz = vfs_getxattr_alloc(h_src, name, buf, 0, GFP_NOFS);
 	err = ssz;
 	if (unlikely(err <= 0)) {
-		AuTraceErr(err);
 		if (err == -ENODATA
 		    || (err == -EOPNOTSUPP
-			&& (ignore_flags & au_xattr_out_of_list)))
+			&& ((ignore_flags & au_xattr_out_of_list)
+			    || (au_test_nfs_noacl(h_src->d_inode)
+				&& (!strcmp(name, XATTR_NAME_POSIX_ACL_ACCESS)
+				    || !strcmp(name,
+					       XATTR_NAME_POSIX_ACL_DEFAULT))))
+			    ))
 			err = 0;
+		if (err && (verbose || au_debug_test()))
+			pr_err("%s, err %d\n", name, err);
 		goto out;
 	}
 
@@ -72,7 +92,8 @@ static int au_do_cpup_xattr(struct dentry *h_dst, struct dentry *h_src,
 	err = vfsub_setxattr(h_dst, name, *buf, ssz, /*flags*/0);
 	mutex_lock_nested(&h_idst->i_mutex, AuLsc_I_CHILD2);
 	if (unlikely(err)) {
-		AuDbg("%s, err %d\n", name, err);
+		if (verbose || au_debug_test())
+			pr_err("%s, err %d\n", name, err);
 		err = au_xattr_ignore(err, name, ignore_flags);
 	}
 
@@ -80,7 +101,8 @@ out:
 	return err;
 }
 
-int au_cpup_xattr(struct dentry *h_dst, struct dentry *h_src, int ignore_flags)
+int au_cpup_xattr(struct dentry *h_dst, struct dentry *h_src, int ignore_flags,
+		  unsigned int verbose)
 {
 	int err, unlocked, acl_access, acl_default;
 	ssize_t ssz;
@@ -88,7 +110,7 @@ int au_cpup_xattr(struct dentry *h_dst, struct dentry *h_src, int ignore_flags)
 	char *value, *p, *o, *e;
 
 	/* try stopping to update the source inode while we are referencing */
-	/* there should not be the parent-child relation ship between them */
+	/* there should not be the parent-child relationship between them */
 	h_isrc = h_src->d_inode;
 	h_idst = h_dst->d_inode;
 	mutex_unlock(&h_idst->i_mutex);
@@ -100,6 +122,7 @@ int au_cpup_xattr(struct dentry *h_dst, struct dentry *h_src, int ignore_flags)
 	ssz = vfs_listxattr(h_src, NULL, 0);
 	err = ssz;
 	if (unlikely(err < 0)) {
+		AuTraceErr(err);
 		if (err == -ENODATA
 		    || err == -EOPNOTSUPP)
 			err = 0;	/* ignore */
@@ -134,7 +157,8 @@ int au_cpup_xattr(struct dentry *h_dst, struct dentry *h_src, int ignore_flags)
 		acl_default |= !strncmp(p, XATTR_NAME_POSIX_ACL_DEFAULT,
 					sizeof(XATTR_NAME_POSIX_ACL_DEFAULT)
 					- 1);
-		err = au_do_cpup_xattr(h_dst, h_src, p, &value, ignore_flags);
+		err = au_do_cpup_xattr(h_dst, h_src, p, &value, ignore_flags,
+				       verbose);
 		p += strlen(p) + 1;
 	}
 	AuTraceErr(err);
@@ -142,13 +166,13 @@ int au_cpup_xattr(struct dentry *h_dst, struct dentry *h_src, int ignore_flags)
 	if (!err && !acl_access) {
 		err = au_do_cpup_xattr(h_dst, h_src,
 				       XATTR_NAME_POSIX_ACL_ACCESS, &value,
-				       ignore_flags);
+				       ignore_flags, verbose);
 		AuTraceErr(err);
 	}
 	if (!err && !acl_default) {
 		err = au_do_cpup_xattr(h_dst, h_src,
 				       XATTR_NAME_POSIX_ACL_DEFAULT, &value,
-				       ignore_flags);
+				       ignore_flags, verbose);
 		AuTraceErr(err);
 	}
 
@@ -250,110 +274,6 @@ ssize_t aufs_getxattr(struct dentry *dentry, const char *name, void *value,
 	};
 
 	return au_lgxattr(dentry, &arg);
-}
-
-/* cf fs/aufs/i_op.c:aufs_setattr() */
-static int au_h_path_to_set_attr(struct dentry *dentry,
-				 struct au_icpup_args *a, struct path *h_path)
-{
-	int err;
-	struct super_block *sb;
-
-	sb = dentry->d_sb;
-	a->udba = au_opt_udba(sb);
-	/* no d_unlinked(), to set UDBA_NONE for root */
-	if (d_unhashed(dentry))
-		a->udba = AuOpt_UDBA_NONE;
-	if (a->udba != AuOpt_UDBA_NONE) {
-		AuDebugOn(IS_ROOT(dentry));
-		err = au_reval_for_attr(dentry, au_sigen(sb));
-		if (unlikely(err))
-			goto out;
-	}
-	err = au_pin_and_icpup(dentry, /*ia*/NULL, a);
-	if (unlikely(err < 0))
-		goto out;
-
-	h_path->dentry = a->h_path.dentry;
-	h_path->mnt = au_sbr_mnt(sb, a->btgt);
-
-out:
-	return err;
-}
-
-enum {
-	AU_XATTR_SET,
-	AU_XATTR_REMOVE
-};
-
-struct au_srxattr {
-	int type;
-	union {
-		struct {
-			const char	*name;
-			const void	*value;
-			size_t		size;
-			int		flags;
-		} set;
-		struct {
-			const char	*name;
-		} remove;
-	} u;
-};
-
-static ssize_t au_srxattr(struct dentry *dentry, struct au_srxattr *arg)
-{
-	int err;
-	struct path h_path;
-	struct super_block *sb;
-	struct au_icpup_args *a;
-	struct inode *inode;
-
-	inode = dentry->d_inode;
-	IMustLock(inode);
-
-	err = -ENOMEM;
-	a = kzalloc(sizeof(*a), GFP_NOFS);
-	if (unlikely(!a))
-		goto out;
-
-	sb = dentry->d_sb;
-	err = si_read_lock(sb, AuLock_FLUSH | AuLock_NOPLM);
-	if (unlikely(err))
-		goto out_kfree;
-
-	h_path.dentry = NULL;	/* silence gcc */
-	di_write_lock_child(dentry);
-	err = au_h_path_to_set_attr(dentry, a, &h_path);
-	if (unlikely(err))
-		goto out_di;
-
-	mutex_unlock(&a->h_inode->i_mutex);
-	switch (arg->type) {
-	case AU_XATTR_SET:
-		err = vfsub_setxattr(h_path.dentry,
-				     arg->u.set.name, arg->u.set.value,
-				     arg->u.set.size, arg->u.set.flags);
-		break;
-	case AU_XATTR_REMOVE:
-		err = vfsub_removexattr(h_path.dentry, arg->u.remove.name);
-		break;
-	}
-	if (!err)
-		au_cpup_attr_timesizes(inode);
-
-	au_unpin(&a->pin);
-	if (unlikely(err))
-		au_update_dbstart(dentry);
-
-out_di:
-	di_write_unlock(dentry);
-	si_read_unlock(sb);
-out_kfree:
-	kfree(a);
-out:
-	AuTraceErr(err);
-	return err;
 }
 
 int aufs_setxattr(struct dentry *dentry, const char *name, const void *value,

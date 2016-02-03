@@ -1,5 +1,18 @@
 /*
- * Copyright (C) 2005-2014 Junjiro R. Okajima
+ * Copyright (C) 2005-2015 Junjiro R. Okajima
+ *
+ * This program, aufs is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 /*
@@ -305,7 +318,7 @@ struct dentry *au_h_dptr(struct dentry *dentry, aufs_bindex_t bindex)
 		return NULL;
 	AuDebugOn(bindex < 0);
 	d = au_di(dentry)->di_hdentry[0 + bindex].hd_dentry;
-	AuDebugOn(d && d_count(d) <= 0);
+	AuDebugOn(d && au_dcount(d) <= 0);
 	return d;
 }
 

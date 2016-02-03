@@ -1,5 +1,18 @@
 /*
- * Copyright (C) 2005-2014 Junjiro R. Okajima
+ * Copyright (C) 2005-2015 Junjiro R. Okajima
+ *
+ * This program, aufs is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 /*
@@ -77,6 +90,7 @@ extern const struct file_operations aufs_dir_fop;
 void au_add_nlink(struct inode *dir, struct inode *h_dir);
 void au_sub_nlink(struct inode *dir, struct inode *h_dir);
 loff_t au_dir_size(struct file *file, struct dentry *dentry);
+void au_dir_ts(struct inode *dir, aufs_bindex_t bsrc);
 int au_test_empty_lower(struct dentry *dentry);
 int au_test_empty(struct dentry *dentry, struct au_nhash *whlist);
 
