@@ -41,6 +41,7 @@
 #include <linux/notifier.h>
 #include <linux/memory.h>
 #include <linux/printk.h>
+#include <linux/ksm.h>
 #include <linux/userfaultfd_k.h>
 
 #include <asm/uaccess.h>
@@ -3025,6 +3026,7 @@ struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
 			new_vma->vm_ops->open(new_vma);
 		vma_link(mm, new_vma, prev, rb_link, rb_parent);
 		*need_rmap_locks = false;
+		uksm_vma_add_new(new_wma);
 	}
 	return new_vma;
 
