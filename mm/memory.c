@@ -2133,9 +2133,7 @@ static int wp_page_copy(struct mm_struct *mm, struct vm_area_struct *vma,
 				dec_mm_counter_fast(mm, MM_FILEPAGES);
 				inc_mm_counter_fast(mm, MM_ANONPAGES);
 			}
-			uksm_bugon_zeropage(orig_pte);
 		} else {
-			uksm_unmap_zeropage(orig_pte);
 			inc_mm_counter_fast(mm, MM_ANONPAGES);
 		}
 		flush_cache_page(vma, address, pte_pfn(orig_pte));
